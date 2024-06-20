@@ -2,7 +2,7 @@
 # Nginx with Brotli, Headers More modules.
 ##################################################
 
-FROM alpine:latest AS builder
+FROM alpine:3.18.3 AS builder
 
 LABEL maintainer="Woosungchoi <https://github.com/woosungchoi>"
 
@@ -176,7 +176,7 @@ RUN set -x; \
 RUN apk add --no-cache openssl \
   && openssl req -x509 -newkey rsa:4096 -nodes -keyout /etc/ssl/private/localhost.key -out /etc/ssl/localhost.pem -days 365 -sha256 -subj '/CN=localhost'
 
-FROM alpine:latest
+FROM alpine:3.18.3
 
 COPY --from=builder /usr/sbin/nginx /usr/sbin/nginx-debug /usr/sbin/
 COPY --from=builder /usr/lib/nginx /usr/lib/
