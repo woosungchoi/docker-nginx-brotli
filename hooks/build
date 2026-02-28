@@ -1,0 +1,18 @@
+#!/bin/bash
+echo "=> Build hook started for branch: $SOURCE_BRANCH"
+
+# 1. buildx 환경 생성 및 사용 설정
+docker buildx create --name mybuilder --use
+
+# 2. QEMU 에뮬레이터 설정 (Docker Hub의 amd64 서버에서 arm64를 빌드하기 위해 필수)
+docker run --rm --privileged multiarch/qemu-user-static --reset -p yes
+
+# 3. 브랜치명에 따른 아키텍처 분기 및 빌드
+if [ "$SOURCE_BRANCH" == "arm64" ]; then
+  echo "=> Building for arm64..."
+  # buildx로 빌드 후 바로 push까지 수행 (--push)
+  docker buildx build --platform linux/arm64 -f $DOCKERFILE_PATH -t $IMAGE_NAME --push .
+else
+  echo "=> Building for amd64 (master or other branches)..."
+  docker buildx build --platform linux/amd64 -f $DOCKERFILE_PATH -t $IMAGE_NAME --push .
+fi
