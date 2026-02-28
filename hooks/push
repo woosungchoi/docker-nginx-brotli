@@ -1,0 +1,3 @@
+#!/bin/bash
+echo "=> Push is already handled by buildx in the build hook. Skipping default push."
+exit 0
