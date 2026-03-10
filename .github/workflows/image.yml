@@ -33,18 +33,19 @@ jobs:
           VCS_REF=$(git rev-parse --short HEAD)
           GHCR_IMAGE="ghcr.io/${REPO_OWNER,,}/${IMG}"
 
+          if [ -n "$DOCKER_USERNAME" ] && [ -n "$DOCKER_PASSWORD" ]; then
+            HAS_DOCKERHUB=true
+          else
+            HAS_DOCKERHUB=false
+          fi
+
           echo "BUILD_VER=1.0.${GITHUB_RUN_NUMBER}" >> "$GITHUB_ENV"
           echo "GHCR_IMAGE=${GHCR_IMAGE}" >> "$GITHUB_ENV"
           echo "BUILD_DATE=${BUILD_DATE}" >> "$GITHUB_ENV"
           echo "GIT_SHA=${GIT_SHA}" >> "$GITHUB_ENV"
           echo "GIT_REF=${GIT_REF}" >> "$GITHUB_ENV"
           echo "VCS_REF=${VCS_REF}" >> "$GITHUB_ENV"
-
-          if [ -n "$DOCKER_USERNAME" ] && [ -n "$DOCKER_PASSWORD" ]; then
-            echo "HAS_DOCKERHUB=true" >> "$GITHUB_ENV"
-          else
-            echo "HAS_DOCKERHUB=false" >> "$GITHUB_ENV"
-          fi
+          echo "HAS_DOCKERHUB=${HAS_DOCKERHUB}" >> "$GITHUB_ENV"
 
           {
             echo 'IMAGE_TAGS<<EOF'
