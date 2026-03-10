@@ -24,6 +24,8 @@ jobs:
       - name: Set environment variables
         env:
           REPO_OWNER: ${{ github.repository_owner }}
+          DOCKER_USERNAME: ${{ secrets.DOCKER_USERNAME }}
+          DOCKER_PASSWORD: ${{ secrets.DOCKER_PASSWORD }}
         run: |
           BUILD_DATE=$(date -u +'%Y-%m-%dT%H:%M:%SZ')
           GIT_SHA=$(echo '${{ github.sha }}' | cut -c1-7)
@@ -43,10 +45,13 @@ jobs:
             echo "${GHCR_IMAGE}:latest"
             echo "${GHCR_IMAGE}:${GIT_REF}"
             echo "${GHCR_IMAGE}:${GIT_SHA}"
-            if [ -n "${{ secrets.DOCKER_USERNAME }}" ] && [ -n "${{ secrets.DOCKER_PASSWORD }}" ]; then
-              echo "${{ secrets.DOCKER_USERNAME }}/${DOCKERHUB_IMG}:latest"
-              echo "${{ secrets.DOCKER_USERNAME }}/${DOCKERHUB_IMG}:${GIT_REF}"
-              echo "${{ secrets.DOCKER_USERNAME }}/${DOCKERHUB_IMG}:${GIT_SHA}"
+            if [ -n "$DOCKER_USERNAME" ] && [ -n "$DOCKER_PASSWORD" ]; then
+              echo "${DOCKER_USERNAME}/${DOCKERHUB_IMG}:latest"
+              echo "${DOCKER_USERNAME}/${DOCKERHUB_IMG}:${GIT_REF}"
+              echo "${DOCKER_USERNAME}/${DOCKERHUB_IMG}:${GIT_SHA}"
+              echo "HAS_DOCKERHUB=true" >> "$GITHUB_ENV"
+            else
+              echo "HAS_DOCKERHUB=false" >> "$GITHUB_ENV"
             fi
             echo 'EOF'
           } >> "$GITHUB_ENV"
@@ -65,7 +70,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Log in to Docker Hub
-        if: ${{ secrets.DOCKER_USERNAME != '' && secrets.DOCKER_PASSWORD != '' }}
+        if: env.HAS_DOCKERHUB == 'true'
         uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKER_USERNAME }}
