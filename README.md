@@ -5,10 +5,12 @@ Alpine Linux image with nginx `latest` with, TLSv1.3, 0-RTT, brotli, NJS, Cookie
 The supported automated build and publish path for this repository is now **GitHub Actions**.
 The release workflow lives in [`.github/workflows/image.yml`](.github/workflows/image.yml) and is recognized by GitHub Actions on the default branch.
 
-Published images:
+Published image:
 
 - **Primary:** `ghcr.io/woosungchoi/nginx-http3`
-- **Optional mirror:** Docker Hub can be published from the same GitHub Actions workflow when `DOCKER_USERNAME` and `DOCKER_PASSWORD` repository secrets are configured.
+
+Docker Hub autobuild is intentionally retired for this repository.
+If Docker Hub distribution is ever needed again, it should be added explicitly from GitHub Actions as a mirror rather than re-enabling Docker Hub autobuild hooks.
 
 ## Architecture support
 
@@ -19,8 +21,6 @@ Legacy `hooks/build` and `hooks/push` files are kept as explicit no-ops so an ac
 ## Usage
 
 **GHCR:** `docker pull ghcr.io/woosungchoi/nginx-http3:latest`
-
-**Optional Docker Hub mirror:** `docker pull <dockerhub-user>/nginx-http3:latest`
 
 This is a base image like the default _nginx_ image. It is meant to be used as a drop-in replacement for the nginx base image.
 
