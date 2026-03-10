@@ -2,15 +2,17 @@
 
 Alpine Linux image with nginx `latest` with, TLSv1.3, 0-RTT, brotli, NJS, Cookie-Flag support. All built on the bleeding edge. Built on the edge, for the edge.
 
-The supported automated build and publish path for this repository is now **GitHub Actions**.
+The supported automated build and publish path for this repository is **GitHub Actions**.
 The release workflow lives in [`.github/workflows/image.yml`](.github/workflows/image.yml) and is recognized by GitHub Actions on the default branch.
 
-Published image:
+Published images:
 
 - **Primary:** `ghcr.io/woosungchoi/nginx-http3`
+- **Compatibility mirror:** `docker.io/<dockerhub-user>/docker-nginx-brotli`
 
+GitHub Actions remains the single source of truth for release images.
 Docker Hub autobuild is intentionally retired for this repository.
-If Docker Hub distribution is ever needed again, it should be added explicitly from GitHub Actions as a mirror rather than re-enabling Docker Hub autobuild hooks.
+When Docker Hub credentials are configured as GitHub Actions secrets, the same multi-arch image build is pushed to Docker Hub as a mirror in addition to GHCR.
 
 ## Architecture support
 
@@ -21,6 +23,8 @@ Legacy `hooks/build` and `hooks/push` files are kept as explicit no-ops so an ac
 ## Usage
 
 **GHCR:** `docker pull ghcr.io/woosungchoi/nginx-http3:latest`
+
+**Docker Hub mirror:** `docker pull <dockerhub-user>/docker-nginx-brotli:latest`
 
 This is a base image like the default _nginx_ image. It is meant to be used as a drop-in replacement for the nginx base image.
 
@@ -42,6 +46,27 @@ COPY h3.nginx.conf /etc/nginx/conf.d/
 ```
 
 **NOTE**: Please note that you need a valid [CA](https://en.wikipedia.org/wiki/Certificate_authority) signed certificate for the client to upgrade you to HTTP/2. [Let's Encrypt](https://letsencrypt.org/) is a option for getting a free valid CA signed certificate.
+
+## Release publishing and Docker Hub mirror setup
+
+The workflow always logs in to GHCR and publishes these GHCR tags:
+
+- `ghcr.io/woosungchoi/nginx-http3:latest`
+- `ghcr.io/woosungchoi/nginx-http3:<branch-or-tag>`
+- `ghcr.io/woosungchoi/nginx-http3:<short-sha>`
+
+If both repository secrets below are configured, the workflow also logs in to Docker Hub and mirrors the same tags to the legacy Docker Hub repository name:
+
+- `DOCKER_USERNAME`
+- `DOCKER_PASSWORD`
+
+Mirrored Docker Hub tags:
+
+- `<DOCKER_USERNAME>/docker-nginx-brotli:latest`
+- `<DOCKER_USERNAME>/docker-nginx-brotli:<branch-or-tag>`
+- `<DOCKER_USERNAME>/docker-nginx-brotli:<short-sha>`
+
+If either secret is missing, the workflow skips Docker Hub login and Docker Hub pushes entirely while continuing to publish to GHCR.
 
 ## Automated version pin updates
 

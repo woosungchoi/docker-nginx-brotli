@@ -12,6 +12,7 @@ permissions:
 
 env:
   IMG: nginx-http3
+  DOCKERHUB_IMG: docker-nginx-brotli
 
 jobs:
   build:
@@ -24,12 +25,31 @@ jobs:
         env:
           REPO_OWNER: ${{ github.repository_owner }}
         run: |
+          BUILD_DATE=$(date -u +'%Y-%m-%dT%H:%M:%SZ')
+          GIT_SHA=$(echo '${{ github.sha }}' | cut -c1-7)
+          GIT_REF=$(git symbolic-ref -q --short HEAD || git describe --tags --exact-match || echo "${GITHUB_REF_NAME}")
+          VCS_REF=$(git rev-parse --short HEAD)
+          GHCR_IMAGE="ghcr.io/${REPO_OWNER,,}/${IMG}"
+
           echo "BUILD_VER=1.0.${GITHUB_RUN_NUMBER}" >> "$GITHUB_ENV"
-          echo "IMAGE=ghcr.io/${REPO_OWNER,,}/${IMG}" >> "$GITHUB_ENV"
-          echo "BUILD_DATE=$(date -u +'%Y-%m-%dT%H:%M:%SZ')" >> "$GITHUB_ENV"
-          echo "GIT_SHA=$(echo '${{ github.sha }}' | cut -c1-7)" >> "$GITHUB_ENV"
-          echo "GIT_REF=$(git symbolic-ref -q --short HEAD || git describe --tags --exact-match)" >> "$GITHUB_ENV"
-          echo "VCS_REF=$(git rev-parse --short HEAD)" >> "$GITHUB_ENV"
+          echo "GHCR_IMAGE=${GHCR_IMAGE}" >> "$GITHUB_ENV"
+          echo "BUILD_DATE=${BUILD_DATE}" >> "$GITHUB_ENV"
+          echo "GIT_SHA=${GIT_SHA}" >> "$GITHUB_ENV"
+          echo "GIT_REF=${GIT_REF}" >> "$GITHUB_ENV"
+          echo "VCS_REF=${VCS_REF}" >> "$GITHUB_ENV"
+
+          {
+            echo 'IMAGE_TAGS<<EOF'
+            echo "${GHCR_IMAGE}:latest"
+            echo "${GHCR_IMAGE}:${GIT_REF}"
+            echo "${GHCR_IMAGE}:${GIT_SHA}"
+            if [ -n "${{ secrets.DOCKER_USERNAME }}" ] && [ -n "${{ secrets.DOCKER_PASSWORD }}" ]; then
+              echo "${{ secrets.DOCKER_USERNAME }}/${DOCKERHUB_IMG}:latest"
+              echo "${{ secrets.DOCKER_USERNAME }}/${DOCKERHUB_IMG}:${GIT_REF}"
+              echo "${{ secrets.DOCKER_USERNAME }}/${DOCKERHUB_IMG}:${GIT_SHA}"
+            fi
+            echo 'EOF'
+          } >> "$GITHUB_ENV"
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
@@ -44,6 +64,13 @@ jobs:
           username: ${{ github.repository_owner }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Log in to Docker Hub
+        if: ${{ secrets.DOCKER_USERNAME != '' && secrets.DOCKER_PASSWORD != '' }}
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
       - name: Build and push image
         uses: docker/build-push-action@v6
         with:
@@ -55,10 +82,7 @@ jobs:
             org.opencontainers.image.revision=${{ github.sha }}
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.version=${{ env.BUILD_VER }}
-          tags: |
-            ${{ env.IMAGE }}:latest
-            ${{ env.IMAGE }}:${{ env.GIT_REF }}
-            ${{ env.IMAGE }}:${{ env.GIT_SHA }}
+          tags: ${{ env.IMAGE_TAGS }}
           build-args: |
             BUILD_DATE=${{ env.BUILD_DATE }}
             VCS_REF=${{ env.VCS_REF }}
