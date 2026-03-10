@@ -4,6 +4,12 @@ Alpine Linux image with nginx `latest` with, TLSv1.3, 0-RTT, brotli, NJS, Cookie
 
 Images for this are available on [Docker Hub](https://hub.docker.com/r/woosungchoi/docker-nginx-brotli).
 
+## Architecture support
+
+The Docker Hub autobuild hooks are configured to publish a single multi-arch manifest for `latest` containing both `linux/amd64` and `linux/arm64` from one `buildx --platform ... --push` invocation. That avoids the older branch-split flow where each branch pushed only one architecture and the final tag could lose one platform. The build hook only publishes from the release branch (`master`/`main`) so stale architecture-specific branches do not overwrite `latest`.
+
+This assumes the Docker Hub autobuild environment supports `docker buildx` and a privileged `binfmt` helper container.
+
 ## Usage
 
 **Docker Hub:** `docker pull woosungchoi/docker-nginx-brotli`

@@ -1,18 +1,38 @@
 #!/bin/bash
-echo "=> Build hook started for branch: $SOURCE_BRANCH"
+set -eu
 
-# 1. buildx 환경 생성 및 사용 설정
-docker buildx create --name mybuilder --use
+echo "=> Build hook started for branch: ${SOURCE_BRANCH:-unknown}"
+echo "=> Target image: ${IMAGE_NAME:-unset}"
+echo "=> Dockerfile path: ${DOCKERFILE_PATH:-Dockerfile}"
 
-# 2. QEMU 에뮬레이터 설정 (Docker Hub의 amd64 서버에서 arm64를 빌드하기 위해 필수)
-docker run --rm --privileged multiarch/qemu-user-static --reset -p yes
+case "${SOURCE_BRANCH:-}" in
+  master|main)
+    ;;
+  *)
+    echo "=> Skipping autobuild for non-release branch: ${SOURCE_BRANCH:-unknown}"
+    exit 0
+    ;;
+esac
 
-# 3. 브랜치명에 따른 아키텍처 분기 및 빌드
-if [ "$SOURCE_BRANCH" == "arm64" ]; then
-  echo "=> Building for arm64..."
-  # buildx로 빌드 후 바로 push까지 수행 (--push)
-  docker buildx build --platform linux/arm64 -f $DOCKERFILE_PATH -t $IMAGE_NAME --push .
-else
-  echo "=> Building for amd64 (master or other branches)..."
-  docker buildx build --platform linux/amd64 -f $DOCKERFILE_PATH -t $IMAGE_NAME --push .
-fi
+# Docker Hub autobuild runs this hook on one builder host. To publish a real
+# multi-arch tag, build both target platforms in a single buildx invocation so
+# the registry receives one manifest list for the tag instead of separate
+# single-arch pushes from different branches.
+BUILDER_NAME="dockerhub-multiarch"
+PLATFORMS="linux/amd64,linux/arm64"
+
+# Register binfmt handlers so the amd64 Docker Hub worker can build arm64 too.
+# This assumes Docker Hub autobuild still permits privileged helper containers.
+docker run --rm --privileged tonistiigi/binfmt --install all
+
+# Reuse the builder if it already exists.
+docker buildx create --name "${BUILDER_NAME}" --use >/dev/null 2>&1 || docker buildx use "${BUILDER_NAME}"
+docker buildx inspect --bootstrap
+
+echo "=> Building and pushing multi-arch image for ${PLATFORMS}"
+docker buildx build \
+  --platform "${PLATFORMS}" \
+  -f "${DOCKERFILE_PATH}" \
+  -t "${IMAGE_NAME}" \
+  --push \
+  .
