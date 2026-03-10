@@ -40,18 +40,21 @@ jobs:
           echo "GIT_REF=${GIT_REF}" >> "$GITHUB_ENV"
           echo "VCS_REF=${VCS_REF}" >> "$GITHUB_ENV"
 
+          if [ -n "$DOCKER_USERNAME" ] && [ -n "$DOCKER_PASSWORD" ]; then
+            echo "HAS_DOCKERHUB=true" >> "$GITHUB_ENV"
+          else
+            echo "HAS_DOCKERHUB=false" >> "$GITHUB_ENV"
+          fi
+
           {
             echo 'IMAGE_TAGS<<EOF'
             echo "${GHCR_IMAGE}:latest"
             echo "${GHCR_IMAGE}:${GIT_REF}"
             echo "${GHCR_IMAGE}:${GIT_SHA}"
-            if [ -n "$DOCKER_USERNAME" ] && [ -n "$DOCKER_PASSWORD" ]; then
+            if [ "$HAS_DOCKERHUB" = "true" ]; then
               echo "${DOCKER_USERNAME}/${DOCKERHUB_IMG}:latest"
               echo "${DOCKER_USERNAME}/${DOCKERHUB_IMG}:${GIT_REF}"
               echo "${DOCKER_USERNAME}/${DOCKERHUB_IMG}:${GIT_SHA}"
-              echo "HAS_DOCKERHUB=true" >> "$GITHUB_ENV"
-            else
-              echo "HAS_DOCKERHUB=false" >> "$GITHUB_ENV"
             fi
             echo 'EOF'
           } >> "$GITHUB_ENV"
