@@ -2,17 +2,25 @@
 
 Alpine Linux image with nginx `latest` with, TLSv1.3, 0-RTT, brotli, NJS, Cookie-Flag support. All built on the bleeding edge. Built on the edge, for the edge.
 
-Images for this are available on [Docker Hub](https://hub.docker.com/r/woosungchoi/docker-nginx-brotli).
+The supported automated build and publish path for this repository is now **GitHub Actions**.
+The release workflow lives in [`.github/workflows/image.yml`](.github/workflows/image.yml) and is recognized by GitHub Actions on the default branch.
+
+Published images:
+
+- **Primary:** `ghcr.io/woosungchoi/nginx-http3`
+- **Optional mirror:** Docker Hub can be published from the same GitHub Actions workflow when `DOCKER_USERNAME` and `DOCKER_PASSWORD` repository secrets are configured.
 
 ## Architecture support
 
-The Docker Hub autobuild hooks are configured to publish a single multi-arch manifest for `latest` containing both `linux/amd64` and `linux/arm64` from one `buildx --platform ... --push` invocation. That avoids the older branch-split flow where each branch pushed only one architecture and the final tag could lose one platform. The build hook only publishes from the release branch (`master`/`main`) so stale architecture-specific branches do not overwrite `latest`.
+The GitHub Actions image workflow publishes a single multi-arch manifest from one `buildx --platform ... --push` invocation. That keeps one authoritative build pipeline for release images and avoids the older Docker Hub autobuild branch-split behavior where tags could drift or lose a platform.
 
-This assumes the Docker Hub autobuild environment supports `docker buildx` and a privileged `binfmt` helper container.
+Legacy `hooks/build` and `hooks/push` files are kept as explicit no-ops so an accidental Docker Hub autobuild re-enable does not publish from an unexpected path.
 
 ## Usage
 
-**Docker Hub:** `docker pull woosungchoi/docker-nginx-brotli`
+**GHCR:** `docker pull ghcr.io/woosungchoi/nginx-http3:latest`
+
+**Optional Docker Hub mirror:** `docker pull <dockerhub-user>/nginx-http3:latest`
 
 This is a base image like the default _nginx_ image. It is meant to be used as a drop-in replacement for the nginx base image.
 
@@ -22,7 +30,7 @@ Example:
 
 ```Dockerfile
 # Base Nginx HTTP/2 Image
-FROM woosungchoi/docker-nginx-brotli:latest
+FROM ghcr.io/woosungchoi/nginx-http3:latest
 
 # Copy your certs.
 COPY localhost.key /etc/ssl/private/

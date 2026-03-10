@@ -1,38 +1,7 @@
 #!/bin/bash
 set -eu
 
-echo "=> Build hook started for branch: ${SOURCE_BRANCH:-unknown}"
-echo "=> Target image: ${IMAGE_NAME:-unset}"
-echo "=> Dockerfile path: ${DOCKERFILE_PATH:-Dockerfile}"
-
-case "${SOURCE_BRANCH:-}" in
-  master|main)
-    ;;
-  *)
-    echo "=> Skipping autobuild for non-release branch: ${SOURCE_BRANCH:-unknown}"
-    exit 0
-    ;;
-esac
-
-# Docker Hub autobuild runs this hook on one builder host. To publish a real
-# multi-arch tag, build both target platforms in a single buildx invocation so
-# the registry receives one manifest list for the tag instead of separate
-# single-arch pushes from different branches.
-BUILDER_NAME="dockerhub-multiarch"
-PLATFORMS="linux/amd64,linux/arm64"
-
-# Register binfmt handlers so the amd64 Docker Hub worker can build arm64 too.
-# This assumes Docker Hub autobuild still permits privileged helper containers.
-docker run --rm --privileged tonistiigi/binfmt --install all
-
-# Reuse the builder if it already exists.
-docker buildx create --name "${BUILDER_NAME}" --use >/dev/null 2>&1 || docker buildx use "${BUILDER_NAME}"
-docker buildx inspect --bootstrap
-
-echo "=> Building and pushing multi-arch image for ${PLATFORMS}"
-docker buildx build \
-  --platform "${PLATFORMS}" \
-  -f "${DOCKERFILE_PATH}" \
-  -t "${IMAGE_NAME}" \
-  --push \
-  .
+echo "=> Docker Hub autobuild hook is intentionally disabled."
+echo "=> This repository now uses GitHub Actions as the only supported build/publish path."
+echo "=> If you want Docker Hub publishing, configure it as a mirror from .github/workflows/image.yml."
+exit 0

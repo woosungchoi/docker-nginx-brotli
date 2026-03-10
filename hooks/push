@@ -1,3 +1,6 @@
 #!/bin/bash
-echo "=> Push is already handled by buildx in the build hook. Skipping default push."
+set -eu
+
+echo "=> Docker Hub autobuild push hook is intentionally disabled."
+echo "=> Publishing is handled by GitHub Actions, not Docker Hub autobuild hooks."
 exit 0
