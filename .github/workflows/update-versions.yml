@@ -1,0 +1,46 @@
+name: update pinned dependency versions
+
+on:
+  schedule:
+    - cron: '17 3 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  update-versions:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Resolve latest upstream versions
+        run: python3 scripts/update_versions.py
+
+      - name: Create pull request if Dockerfile changed
+        uses: peter-evans/create-pull-request@v7
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          commit-message: 'chore: update nginx, pcre2, and zlib versions'
+          title: 'chore: update nginx, pcre2, and zlib versions'
+          body: |
+            Automated dependency pin refresh for the Dockerfile.
+
+            This workflow:
+            - tracks the latest nginx mainline release from nginx.org/download/
+            - tracks the latest stable PCRE2 release from GitHub
+            - tracks the latest stable zlib release from GitHub
+
+            Please review the updated pins and let CI/build validation run before merging.
+          branch: ci/update-pinned-versions
+          delete-branch: true
+          labels: |
+            dependencies
+            automated pr

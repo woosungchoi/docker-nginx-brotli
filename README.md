@@ -35,6 +35,45 @@ COPY h3.nginx.conf /etc/nginx/conf.d/
 
 **NOTE**: Please note that you need a valid [CA](https://en.wikipedia.org/wiki/Certificate_authority) signed certificate for the client to upgrade you to HTTP/2. [Let's Encrypt](https://letsencrypt.org/) is a option for getting a free valid CA signed certificate.
 
+## Automated version pin updates
+
+The Dockerfile pins `NGINX_VERSION`, `PCRE_VERSION`, and `ZLIB_VERSION` on purpose.
+A scheduled GitHub Actions workflow now checks for upstream releases and opens a pull request when those pins need to move.
+
+Key files:
+
+- `scripts/update_versions.py` - resolves the latest supported versions and rewrites the Dockerfile when needed
+- `.github/workflows/update-versions.yml` - runs weekly on a schedule and on manual dispatch, then opens or updates a PR via `peter-evans/create-pull-request`
+
+### What gets tracked
+
+- **NGINX:** latest **mainline** release only, parsed from `https://nginx.org/download/`
+  - The updater looks for `nginx-X.Y.Z.tar.gz` entries and keeps only versions where the **minor** number `Y` is odd.
+  - Example: `1.29.x` is mainline, `1.28.x` is stable.
+- **PCRE2:** latest stable GitHub release from `PCRE2Project/pcre2`
+- **zlib:** latest stable GitHub release from `madler/zlib`
+
+### How PR creation works
+
+The workflow does not auto-merge anything.
+If the updater changes the Dockerfile, GitHub Actions commits those changes to a dedicated branch (`ci/update-pinned-versions`) and opens or refreshes a pull request against the default branch using the standard `GITHUB_TOKEN`.
+
+That means the usual GitHub Actions defaults should be enough as long as repository settings allow workflows to create branches and pull requests.
+
+### Local validation
+
+You can inspect what the updater would do without editing files:
+
+```bash
+python3 scripts/update_versions.py --dry-run
+```
+
+To fail when updates are available (useful for local checks):
+
+```bash
+python3 scripts/update_versions.py --check
+```
+
 ## Features
 
 - HTTP/2 (with Server Push)
