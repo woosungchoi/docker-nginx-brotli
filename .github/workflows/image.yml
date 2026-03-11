@@ -33,6 +33,12 @@ jobs:
           VCS_REF=$(git rev-parse --short HEAD)
           GHCR_IMAGE="ghcr.io/${REPO_OWNER,,}/${IMG}"
 
+          if [ "$GIT_REF" = "master" ]; then
+            PUBLISH_REF_TAG=false
+          else
+            PUBLISH_REF_TAG=true
+          fi
+
           if [ -n "$DOCKER_USERNAME" ] && [ -n "$DOCKER_PASSWORD" ]; then
             HAS_DOCKERHUB=true
           else
@@ -46,15 +52,20 @@ jobs:
           echo "GIT_REF=${GIT_REF}" >> "$GITHUB_ENV"
           echo "VCS_REF=${VCS_REF}" >> "$GITHUB_ENV"
           echo "HAS_DOCKERHUB=${HAS_DOCKERHUB}" >> "$GITHUB_ENV"
+          echo "PUBLISH_REF_TAG=${PUBLISH_REF_TAG}" >> "$GITHUB_ENV"
 
           {
             echo 'IMAGE_TAGS<<EOF'
             echo "${GHCR_IMAGE}:latest"
-            echo "${GHCR_IMAGE}:${GIT_REF}"
+            if [ "$PUBLISH_REF_TAG" = "true" ]; then
+              echo "${GHCR_IMAGE}:${GIT_REF}"
+            fi
             echo "${GHCR_IMAGE}:${GIT_SHA}"
             if [ "$HAS_DOCKERHUB" = "true" ]; then
               echo "${DOCKER_USERNAME}/${DOCKERHUB_IMG}:latest"
-              echo "${DOCKER_USERNAME}/${DOCKERHUB_IMG}:${GIT_REF}"
+              if [ "$PUBLISH_REF_TAG" = "true" ]; then
+                echo "${DOCKER_USERNAME}/${DOCKERHUB_IMG}:${GIT_REF}"
+              fi
               echo "${DOCKER_USERNAME}/${DOCKERHUB_IMG}:${GIT_SHA}"
             fi
             echo 'EOF'
