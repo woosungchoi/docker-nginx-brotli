@@ -1,0 +1,32 @@
+name: smoke-test
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  docker-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build image for smoke test
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          load: true
+          tags: nginx-http3:smoke
+
+      - name: Check nginx version
+        run: docker run --rm nginx-http3:smoke nginx -v
+
+      - name: Test nginx configuration
+        run: docker run --rm nginx-http3:smoke nginx -t

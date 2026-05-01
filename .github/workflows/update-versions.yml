@@ -34,7 +34,7 @@ jobs:
             Automated dependency pin refresh for the Dockerfile.
 
             This workflow:
-            - tracks the latest nginx mainline release from nginx.org/download/
+            - tracks the latest nginx stable release from nginx.org/download/
             - tracks the latest stable PCRE2 release from GitHub
             - tracks the latest stable zlib release from GitHub
 

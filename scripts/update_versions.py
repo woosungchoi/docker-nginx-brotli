@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Update Dockerfile dependency pins for nginx mainline, PCRE2, and zlib.
+"""Update Dockerfile dependency pins for nginx stable, PCRE2, and zlib.
 
 This script is intended for local use and for the scheduled GitHub Actions workflow.
 It updates the following ENV assignments in the repository Dockerfile:
 
-- NGINX_VERSION: latest nginx mainline release from https://nginx.org/download/
+- NGINX_VERSION: latest nginx stable release from https://nginx.org/download/
 - PCRE_VERSION: latest stable PCRE2 release from GitHub
 - ZLIB_VERSION: latest stable zlib release from GitHub
 
@@ -62,18 +62,18 @@ def parse_semver(version: str) -> Tuple[int, ...]:
         raise UpdateError(f"invalid version string: {version}") from exc
 
 
-def latest_nginx_mainline_version(html: str) -> str:
+def latest_nginx_stable_version(html: str) -> str:
     matches = set(re.findall(r"nginx-(\d+\.\d+\.\d+)\.tar\.gz", html))
     if not matches:
         raise UpdateError("could not find any nginx release versions on nginx.org/download/")
 
-    mainline_versions = [
-        version for version in matches if parse_semver(version)[1] % 2 == 1
+    stable_versions = [
+        version for version in matches if parse_semver(version)[1] % 2 == 0
     ]
-    if not mainline_versions:
-        raise UpdateError("could not find any nginx mainline releases (odd minor series)")
+    if not stable_versions:
+        raise UpdateError("could not find any nginx stable releases (even minor series)")
 
-    return max(mainline_versions, key=parse_semver)
+    return max(stable_versions, key=parse_semver)
 
 
 def latest_github_release_version(url: str, *, prefix_to_strip: str = "") -> str:
@@ -141,7 +141,7 @@ def main() -> int:
     current_versions = extract_current_versions(original_text)
 
     latest_versions = {
-        "NGINX_VERSION": latest_nginx_mainline_version(fetch_text(NGINX_DOWNLOAD_URL)),
+        "NGINX_VERSION": latest_nginx_stable_version(fetch_text(NGINX_DOWNLOAD_URL)),
         "PCRE_VERSION": latest_github_release_version(PCRE2_RELEASE_URL, prefix_to_strip="pcre2-"),
         "ZLIB_VERSION": latest_github_release_version(ZLIB_RELEASE_URL, prefix_to_strip="v"),
     }
