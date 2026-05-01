@@ -1,0 +1,139 @@
+name: auto-merge dependency PR
+
+on:
+  workflow_run:
+    workflows:
+      - smoke-test
+    types:
+      - completed
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: Pull request number to evaluate
+        required: true
+        type: number
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+  actions: read
+
+jobs:
+  auto-merge:
+    runs-on: ubuntu-latest
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.event.workflow_run.conclusion == 'success'
+    steps:
+      - name: Resolve pull request
+        id: pr
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          EVENT_NAME: ${{ github.event_name }}
+          WORKFLOW_PR: ${{ github.event.workflow_run.pull_requests[0].number }}
+          INPUT_PR: ${{ inputs.pr }}
+        run: |
+          set -euo pipefail
+
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            PR_NUMBER="$INPUT_PR"
+          else
+            PR_NUMBER="$WORKFLOW_PR"
+          fi
+
+          if [ -z "${PR_NUMBER:-}" ] || [ "$PR_NUMBER" = "null" ]; then
+            echo "No pull request attached to this smoke-test run."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          PR_JSON=$(gh pr view "$PR_NUMBER" --repo "$REPO" --json number,state,author,headRefName,baseRefName,labels)
+          echo "$PR_JSON" > pr.json
+
+          STATE=$(jq -r '.state' pr.json)
+          AUTHOR=$(jq -r '.author.login' pr.json)
+          HAS_DEPENDENCIES=$(jq -r 'any(.labels[].name; . == "dependencies")' pr.json)
+          HAS_AUTOMATED=$(jq -r 'any(.labels[].name; . == "automated pr")' pr.json)
+
+          if [ "$STATE" != "OPEN" ]; then
+            echo "PR #$PR_NUMBER is not open."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if [ "$AUTHOR" != "github-actions[bot]" ] || [ "$HAS_DEPENDENCIES" != "true" ] || [ "$HAS_AUTOMATED" != "true" ]; then
+            echo "PR #$PR_NUMBER is not an automated dependency PR."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "number=$PR_NUMBER" >> "$GITHUB_OUTPUT"
+          echo "skip=false" >> "$GITHUB_OUTPUT"
+
+      - name: Check whether nginx stable branch changed
+        id: policy
+        if: steps.pr.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ steps.pr.outputs.number }}
+        run: |
+          set -euo pipefail
+
+          PR_JSON=$(gh pr view "$PR_NUMBER" --repo "$REPO" --json baseRefName,headRefName)
+          BASE_REF=$(echo "$PR_JSON" | jq -r '.baseRefName')
+          HEAD_REF=$(echo "$PR_JSON" | jq -r '.headRefName')
+
+          git init repo
+          cd repo
+          git remote add origin "https://github.com/$REPO.git"
+          git fetch --depth=1 origin "$BASE_REF" "$HEAD_REF"
+
+          BASE_DOCKERFILE=$(git show "origin/$BASE_REF:Dockerfile")
+          HEAD_DOCKERFILE=$(git show "origin/$HEAD_REF:Dockerfile")
+
+          old_nginx=$(printf '%s\n' "$BASE_DOCKERFILE" | awk '/^ENV NGINX_VERSION / {print $3}')
+          new_nginx=$(printf '%s\n' "$HEAD_DOCKERFILE" | awk '/^ENV NGINX_VERSION / {print $3}')
+
+          if [ -z "$old_nginx" ] || [ -z "$new_nginx" ]; then
+            echo "Could not resolve NGINX_VERSION from Dockerfile."
+            echo "manual=true" >> "$GITHUB_OUTPUT"
+            echo "reason=Could not resolve NGINX_VERSION from Dockerfile." >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          old_branch=$(printf '%s\n' "$old_nginx" | awk -F. '{print $1"."$2}')
+          new_branch=$(printf '%s\n' "$new_nginx" | awk -F. '{print $1"."$2}')
+
+          if [ "$old_branch" != "$new_branch" ]; then
+            echo "manual=true" >> "$GITHUB_OUTPUT"
+            echo "reason=nginx stable branch changed from $old_branch.x to $new_branch.x ($old_nginx -> $new_nginx)." >> "$GITHUB_OUTPUT"
+          else
+            echo "manual=false" >> "$GITHUB_OUTPUT"
+            echo "reason=nginx stable branch did not change ($old_nginx -> $new_nginx)." >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Leave manual-review comment
+        if: steps.pr.outputs.skip != 'true' && steps.policy.outputs.manual == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ steps.pr.outputs.number }}
+          REASON: ${{ steps.policy.outputs.reason }}
+        run: |
+          gh pr comment "$PR_NUMBER" --repo "$REPO" --body "Smoke test passed, but this dependency PR requires manual merge because ${REASON}"
+
+      - name: Auto-merge dependency PR
+        if: steps.pr.outputs.skip != 'true' && steps.policy.outputs.manual == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ steps.pr.outputs.number }}
+          REASON: ${{ steps.policy.outputs.reason }}
+        run: |
+          set -euo pipefail
+          gh pr merge "$PR_NUMBER" --repo "$REPO" --squash --delete-branch \
+            --subject "chore: update nginx, pcre2, and zlib versions" \
+            --body "Automatically merged dependency update after smoke-test passed. ${REASON}"

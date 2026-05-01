@@ -86,12 +86,16 @@ Key files:
 - **PCRE2:** latest stable GitHub release from `PCRE2Project/pcre2`
 - **zlib:** latest stable GitHub release from `madler/zlib`
 
-### How PR creation works
+### How PR creation and merge works
 
-The workflow does not auto-merge anything.
 If the updater changes the Dockerfile, GitHub Actions commits those changes to a dedicated branch (`ci/update-pinned-versions`) and opens or refreshes a pull request against the default branch using the standard `GITHUB_TOKEN`.
 
-That means the usual GitHub Actions defaults should be enough as long as repository settings allow workflows to create branches and pull requests.
+Pull requests run the `smoke-test` workflow first. After that check passes, automated dependency PRs are handled as follows:
+
+- **Auto-merge:** patch-level nginx updates within the same stable branch, PCRE2 updates, and zlib updates.
+- **Manual merge:** nginx stable branch changes, for example `1.30.x` to `1.32.x`.
+
+This keeps routine dependency refreshes automatic while preserving human review for larger nginx stable-branch moves.
 
 ### Local validation
 
