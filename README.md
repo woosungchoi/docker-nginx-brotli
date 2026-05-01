@@ -80,9 +80,9 @@ Key files:
 
 ### What gets tracked
 
-- **NGINX:** latest **mainline** release only, parsed from `https://nginx.org/download/`
-  - The updater looks for `nginx-X.Y.Z.tar.gz` entries and keeps only versions where the **minor** number `Y` is odd.
-  - Example: `1.29.x` is mainline, `1.28.x` is stable.
+- **NGINX:** latest **stable** release only, parsed from `https://nginx.org/download/`
+  - The updater looks for `nginx-X.Y.Z.tar.gz` entries and keeps only versions where the **minor** number `Y` is even.
+  - Example: `1.29.x` is mainline, `1.30.x` is stable.
 - **PCRE2:** latest stable GitHub release from `PCRE2Project/pcre2`
 - **zlib:** latest stable GitHub release from `madler/zlib`
 
