@@ -33,6 +33,7 @@ jobs:
           REPO: ${{ github.repository }}
           EVENT_NAME: ${{ github.event_name }}
           WORKFLOW_PR: ${{ github.event.workflow_run.pull_requests[0].number }}
+          WORKFLOW_HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
           INPUT_PR: ${{ inputs.pr }}
         run: |
           set -euo pipefail
@@ -41,6 +42,15 @@ jobs:
             PR_NUMBER="$INPUT_PR"
           else
             PR_NUMBER="$WORKFLOW_PR"
+          fi
+
+          if { [ -z "${PR_NUMBER:-}" ] || [ "$PR_NUMBER" = "null" ]; } && [ -n "${WORKFLOW_HEAD_BRANCH:-}" ]; then
+            PR_NUMBER=$(gh pr list \
+              --repo "$REPO" \
+              --state open \
+              --head "$WORKFLOW_HEAD_BRANCH" \
+              --json number \
+              --jq '.[0].number // empty')
           fi
 
           if [ -z "${PR_NUMBER:-}" ] || [ "$PR_NUMBER" = "null" ]; then

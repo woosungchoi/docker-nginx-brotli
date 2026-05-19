@@ -8,6 +8,7 @@ on:
 permissions:
   contents: write
   pull-requests: write
+  actions: write
 
 jobs:
   update-versions:
@@ -25,6 +26,7 @@ jobs:
         run: python3 scripts/update_versions.py
 
       - name: Create pull request if Dockerfile changed
+        id: cpr
         uses: peter-evans/create-pull-request@v7
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
@@ -44,3 +46,12 @@ jobs:
           labels: |
             dependencies
             automated pr
+
+      - name: Start smoke test for dependency PR
+        if: steps.cpr.outputs.pull-request-number != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          BRANCH: ci/update-pinned-versions
+        run: |
+          gh workflow run smoke-test.yml --repo "$REPO" --ref "$BRANCH"
