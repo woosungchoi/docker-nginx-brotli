@@ -8,6 +8,7 @@ on:
 permissions:
   contents: write
   pull-requests: write
+  issues: write
   actions: write
 
 jobs:
@@ -55,3 +56,103 @@ jobs:
           BRANCH: ci/update-pinned-versions
         run: |
           gh workflow run smoke-test.yml --repo "$REPO" --ref "$BRANCH"
+
+      - name: Wait for smoke test to pass
+        if: steps.cpr.outputs.pull-request-number != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          BRANCH: ci/update-pinned-versions
+          HEAD_SHA: ${{ steps.cpr.outputs.pull-request-head-sha }}
+        run: |
+          set -euo pipefail
+
+          RUN_ID=""
+          for attempt in $(seq 1 30); do
+            RUN_ID=$(gh run list \
+              --repo "$REPO" \
+              --workflow smoke-test.yml \
+              --branch "$BRANCH" \
+              --event workflow_dispatch \
+              --json databaseId,headSha,createdAt \
+              --jq "map(select(.headSha == \"$HEAD_SHA\")) | sort_by(.createdAt) | reverse | .[0].databaseId // empty")
+
+            if [ -n "$RUN_ID" ]; then
+              break
+            fi
+
+            echo "Waiting for smoke-test run for $HEAD_SHA (attempt $attempt/30)..."
+            sleep 10
+          done
+
+          if [ -z "$RUN_ID" ]; then
+            echo "Could not find a smoke-test workflow_dispatch run for $HEAD_SHA."
+            exit 1
+          fi
+
+          gh run watch "$RUN_ID" --repo "$REPO" --exit-status --interval 30
+
+      - name: Check whether nginx stable branch changed
+        id: policy
+        if: steps.cpr.outputs.pull-request-number != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ steps.cpr.outputs.pull-request-number }}
+        run: |
+          set -euo pipefail
+
+          PR_JSON=$(gh pr view "$PR_NUMBER" --repo "$REPO" --json baseRefName,headRefName)
+          BASE_REF=$(echo "$PR_JSON" | jq -r '.baseRefName')
+          HEAD_REF=$(echo "$PR_JSON" | jq -r '.headRefName')
+
+          git init repo
+          cd repo
+          git remote add origin "https://github.com/$REPO.git"
+          git fetch --depth=1 origin "$BASE_REF" "$HEAD_REF"
+
+          BASE_DOCKERFILE=$(git show "origin/$BASE_REF:Dockerfile")
+          HEAD_DOCKERFILE=$(git show "origin/$HEAD_REF:Dockerfile")
+
+          old_nginx=$(printf '%s\n' "$BASE_DOCKERFILE" | awk '/^ENV NGINX_VERSION / {print $3}')
+          new_nginx=$(printf '%s\n' "$HEAD_DOCKERFILE" | awk '/^ENV NGINX_VERSION / {print $3}')
+
+          if [ -z "$old_nginx" ] || [ -z "$new_nginx" ]; then
+            echo "manual=true" >> "$GITHUB_OUTPUT"
+            echo "reason=Could not resolve NGINX_VERSION from Dockerfile." >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          old_branch=$(printf '%s\n' "$old_nginx" | awk -F. '{print $1"."$2}')
+          new_branch=$(printf '%s\n' "$new_nginx" | awk -F. '{print $1"."$2}')
+
+          if [ "$old_branch" != "$new_branch" ]; then
+            echo "manual=true" >> "$GITHUB_OUTPUT"
+            echo "reason=nginx stable branch changed from $old_branch.x to $new_branch.x ($old_nginx -> $new_nginx)." >> "$GITHUB_OUTPUT"
+          else
+            echo "manual=false" >> "$GITHUB_OUTPUT"
+            echo "reason=nginx stable branch did not change ($old_nginx -> $new_nginx)." >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Leave manual-review comment
+        if: steps.cpr.outputs.pull-request-number != '' && steps.policy.outputs.manual == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ steps.cpr.outputs.pull-request-number }}
+          REASON: ${{ steps.policy.outputs.reason }}
+        run: |
+          gh pr comment "$PR_NUMBER" --repo "$REPO" --body "Smoke test passed, but this dependency PR requires manual merge because ${REASON}"
+
+      - name: Auto-merge dependency PR
+        if: steps.cpr.outputs.pull-request-number != '' && steps.policy.outputs.manual == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ steps.cpr.outputs.pull-request-number }}
+          REASON: ${{ steps.policy.outputs.reason }}
+        run: |
+          set -euo pipefail
+          gh pr merge "$PR_NUMBER" --repo "$REPO" --squash --delete-branch \
+            --subject "chore: update nginx, pcre2, and zlib versions" \
+            --body "Automatically merged dependency update after smoke-test passed. ${REASON}"
