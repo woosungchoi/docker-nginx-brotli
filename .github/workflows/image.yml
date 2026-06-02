@@ -9,6 +9,7 @@ on:
 permissions:
   contents: read
   packages: write
+  id-token: write
 
 env:
   IMG: nginx-http3
@@ -45,14 +46,16 @@ jobs:
             HAS_DOCKERHUB=false
           fi
 
-          echo "BUILD_VER=1.0.${GITHUB_RUN_NUMBER}" >> "$GITHUB_ENV"
-          echo "GHCR_IMAGE=${GHCR_IMAGE}" >> "$GITHUB_ENV"
-          echo "BUILD_DATE=${BUILD_DATE}" >> "$GITHUB_ENV"
-          echo "GIT_SHA=${GIT_SHA}" >> "$GITHUB_ENV"
-          echo "GIT_REF=${GIT_REF}" >> "$GITHUB_ENV"
-          echo "VCS_REF=${VCS_REF}" >> "$GITHUB_ENV"
-          echo "HAS_DOCKERHUB=${HAS_DOCKERHUB}" >> "$GITHUB_ENV"
-          echo "PUBLISH_REF_TAG=${PUBLISH_REF_TAG}" >> "$GITHUB_ENV"
+          {
+            echo "BUILD_VER=1.0.${GITHUB_RUN_NUMBER}"
+            echo "GHCR_IMAGE=${GHCR_IMAGE}"
+            echo "BUILD_DATE=${BUILD_DATE}"
+            echo "GIT_SHA=${GIT_SHA}"
+            echo "GIT_REF=${GIT_REF}"
+            echo "VCS_REF=${VCS_REF}"
+            echo "HAS_DOCKERHUB=${HAS_DOCKERHUB}"
+            echo "PUBLISH_REF_TAG=${PUBLISH_REF_TAG}"
+          } >> "$GITHUB_ENV"
 
           {
             echo 'IMAGE_TAGS<<EOF'
@@ -92,6 +95,7 @@ jobs:
           password: ${{ secrets.DOCKER_PASSWORD }}
 
       - name: Build and push image
+        id: build
         uses: docker/build-push-action@v6
         with:
           labels: |
@@ -108,3 +112,89 @@ jobs:
             VCS_REF=${{ env.VCS_REF }}
           push: true
           platforms: linux/amd64,linux/arm64,linux/arm/v6,linux/arm/v7
+          sbom: true
+          provenance: mode=max
+
+      - name: Verify published image manifests
+        env:
+          EXPECTED_PLATFORMS: linux/amd64 linux/arm64 linux/arm/v6 linux/arm/v7
+          IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+
+          printf '%s\n' \
+            'import json' \
+            'import os' \
+            'import sys' \
+            '' \
+            'manifest = json.load(sys.stdin)' \
+            'expected = set(os.environ["EXPECTED_PLATFORMS"].split())' \
+            'found = set()' \
+            'for item in manifest.get("manifests", []):' \
+            '    platform = item.get("platform") or {}' \
+            '    os_name = platform.get("os")' \
+            '    arch = platform.get("architecture")' \
+            '    if os_name and arch and os_name != "unknown" and arch != "unknown":' \
+            '        variant = platform.get("variant")' \
+            '        value = f"{os_name}/{arch}"' \
+            '        if variant:' \
+            '            value = f"{value}/{variant}"' \
+            '        found.add(value)' \
+            '' \
+            'missing = sorted(expected - found)' \
+            'if missing:' \
+            '    print("missing expected platforms: " + ", ".join(missing), file=sys.stderr)' \
+            '    print("found platforms: " + ", ".join(sorted(found)), file=sys.stderr)' \
+            '    sys.exit(1)' \
+            '' \
+            'print("manifest verification passed: " + ", ".join(sorted(found)))' \
+            > /tmp/verify_manifest.py
+
+          if [ -z "${IMAGE_DIGEST}" ]; then
+            echo "build-push-action did not expose an image digest" >&2
+            exit 1
+          fi
+
+          echo "Published digest: ${IMAGE_DIGEST}"
+          echo "Expected platforms: ${EXPECTED_PLATFORMS}"
+
+          verify_ref() {
+            local image_ref="$1"
+
+            echo "Verifying ${image_ref}"
+            resolved_digest="$(docker buildx imagetools inspect "${image_ref}" | awk '/^Digest:/ { print $2; exit }')"
+            if [ "${resolved_digest}" != "${IMAGE_DIGEST}" ]; then
+              echo "digest mismatch for ${image_ref}: expected ${IMAGE_DIGEST}, got ${resolved_digest}" >&2
+              exit 1
+            fi
+
+            docker buildx imagetools inspect --raw "${image_ref}" \
+              | EXPECTED_PLATFORMS="${EXPECTED_PLATFORMS}" python3 /tmp/verify_manifest.py
+          }
+
+          while IFS= read -r image_ref; do
+            [ -n "${image_ref}" ] || continue
+            verify_ref "${image_ref}"
+          done <<< "${IMAGE_TAGS}"
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+
+      - name: Sign published image digests
+        env:
+          IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+
+          signed_repositories=""
+          while IFS= read -r image_ref; do
+            [ -n "${image_ref}" ] || continue
+            repository="${image_ref%:*}"
+            case " ${signed_repositories} " in
+              *" ${repository} "*) continue ;;
+            esac
+
+            echo "Signing ${repository}@${IMAGE_DIGEST}"
+            cosign sign --yes "${repository}@${IMAGE_DIGEST}"
+            signed_repositories="${signed_repositories} ${repository}"
+          done <<< "${IMAGE_TAGS}"

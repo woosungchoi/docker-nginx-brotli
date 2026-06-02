@@ -53,7 +53,7 @@ This repository is maintained through GitHub Actions:
 
 - `update pinned dependency versions` checks nginx stable, PCRE2, and zlib weekly and on manual dispatch.
 - `smoke-test` builds the image and runs `nginx -v` plus `nginx -t` before dependency updates merge.
-- `build and publish image` publishes the multi-arch image from the default branch.
+- `build and publish image` publishes the multi-arch image from the default branch, verifies each published tag manifest, emits BuildKit SBOM/provenance attestations, and keylessly signs the published image digest with cosign.
 - Routine dependency updates are auto-merged only after smoke-test passes; nginx stable branch moves stay manual-review only.
 
 ## Release publishing and Docker Hub mirror setup
@@ -64,7 +64,7 @@ The workflow always logs in to GHCR and publishes these GHCR tags:
 - `ghcr.io/woosungchoi/nginx-http3:<branch-or-tag>`
 - `ghcr.io/woosungchoi/nginx-http3:<short-sha>`
 
-Release images are intentionally tied to immutable commit SHA tags as well as `latest`. GitHub Releases are optional for this image-first repository; if release notes are needed, create a release that references the published image digest and short SHA.
+Release images are intentionally tied to immutable commit SHA tags as well as `latest`. After publishing, the workflow verifies that every GHCR and optional Docker Hub mirror tag resolves to the build output digest and includes all expected platforms (`linux/amd64`, `linux/arm64`, `linux/arm/v6`, and `linux/arm/v7`). It also emits BuildKit SBOM/provenance attestations and uses GitHub OIDC keyless cosign signing for the published image digest. GitHub Releases are optional for this image-first repository; if release notes are needed, create a release that references the published image digest and short SHA.
 
 If both repository secrets below are configured, the workflow also logs in to Docker Hub and mirrors the same tags to the legacy Docker Hub repository name:
 
