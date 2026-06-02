@@ -6,9 +6,9 @@ FROM alpine:latest AS builder
 
 LABEL maintainer="Woosungchoi <https://github.com/woosungchoi>"
 
-ENV NGINX_VERSION 1.30.2
-ENV PCRE_VERSION 10.47
-ENV ZLIB_VERSION 1.3.2
+ENV NGINX_VERSION=1.30.2
+ENV PCRE_VERSION=10.47
+ENV ZLIB_VERSION=1.3.2
 
 RUN set -x; \
   CONFIG="\
@@ -213,8 +213,9 @@ STOPSIGNAL SIGTERM
 CMD ["nginx", "-g", "daemon off;"]
 
 # Build-time metadata as defined at http://label-schema.org
+ARG BUILD_DATE
 ARG VCS_REF
 
-LABEL org.label-schema.build-date=$BUILD_DATE \
-  org.label-schema.vcs-ref=$VCS_REF \
+LABEL org.label-schema.build-date="$BUILD_DATE" \
+  org.label-schema.vcs-ref="$VCS_REF" \
   org.label-schema.vcs-url="https://github.com/woosungchoi/docker-nginx-brotli.git"
