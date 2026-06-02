@@ -1,6 +1,6 @@
 # docker-nginx-brotli
 
-Alpine Linux image with nginx `latest` with, TLSv1.3, 0-RTT, brotli, NJS, Cookie-Flag support. All built on the bleeding edge. Built on the edge, for the edge.
+Alpine Linux image with pinned nginx stable, TLS 1.3, HTTP/2, HTTP/3, brotli, headers-more, and Cookie-Flag module support. Dependency pins are refreshed by GitHub Actions and validated with a Docker smoke test before routine updates are merged.
 
 The supported automated build and publish path for this repository is **GitHub Actions**.
 The release workflow lives in [`.github/workflows/image.yml`](.github/workflows/image.yml) and is recognized by GitHub Actions on the default branch.
@@ -47,6 +47,15 @@ COPY h3.nginx.conf /etc/nginx/conf.d/
 
 **NOTE**: Please note that you need a valid [CA](https://en.wikipedia.org/wiki/Certificate_authority) signed certificate for the client to upgrade you to HTTP/2. [Let's Encrypt](https://letsencrypt.org/) is a option for getting a free valid CA signed certificate.
 
+## Maintenance status
+
+This repository is maintained through GitHub Actions:
+
+- `update pinned dependency versions` checks nginx stable, PCRE2, and zlib weekly and on manual dispatch.
+- `smoke-test` builds the image and runs `nginx -v` plus `nginx -t` before dependency updates merge.
+- `build and publish image` publishes the multi-arch image from the default branch.
+- Routine dependency updates are auto-merged only after smoke-test passes; nginx stable branch moves stay manual-review only.
+
 ## Release publishing and Docker Hub mirror setup
 
 The workflow always logs in to GHCR and publishes these GHCR tags:
@@ -54,6 +63,8 @@ The workflow always logs in to GHCR and publishes these GHCR tags:
 - `ghcr.io/woosungchoi/nginx-http3:latest`
 - `ghcr.io/woosungchoi/nginx-http3:<branch-or-tag>`
 - `ghcr.io/woosungchoi/nginx-http3:<short-sha>`
+
+Release images are intentionally tied to immutable commit SHA tags as well as `latest`. GitHub Releases are optional for this image-first repository; if release notes are needed, create a release that references the published image digest and short SHA.
 
 If both repository secrets below are configured, the workflow also logs in to Docker Hub and mirrors the same tags to the legacy Docker Hub repository name:
 
@@ -114,15 +125,14 @@ python3 scripts/update_versions.py --check
 ## Features
 
 - HTTP/2 (with Server Push)
-- BoringSSL (Google's flavor of OpenSSL)
+- OpenSSL-backed TLS support from Alpine packages
 - TLS 1.3 **with 0-RTT support**
 - Brotli compression
 - [headers-more-nginx-module](https://github.com/openresty/headers-more-nginx-module)
-- [NJS](https://www.nginx.com/blog/introduction-nginscript/)
 - [nginx_cookie_flag_module](https://www.nginx.com/products/nginx/modules/cookie-flag/)
 - PCRE latest with [JIT compilation](http://nginx.org/en/docs/ngx_core_module.html#pcre_jit) enabled
 - zlib latest
-- Alpine Linux (total size of **10 MB** compressed)
+- Alpine Linux runtime image
 
 ## HTTP/2 with Server Push
 
