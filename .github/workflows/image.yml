@@ -20,7 +20,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6.0.2
 
       - name: Set environment variables
         env:
@@ -75,13 +75,13 @@ jobs:
           } >> "$GITHUB_ENV"
 
       - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
+        uses: docker/setup-qemu-action@v4.1.0
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4.1.0
 
       - name: Log in to GitHub Container Registry
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4.2.0
         with:
           registry: ghcr.io
           username: ${{ github.repository_owner }}
@@ -89,14 +89,14 @@ jobs:
 
       - name: Log in to Docker Hub
         if: env.HAS_DOCKERHUB == 'true'
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4.2.0
         with:
           username: ${{ secrets.DOCKER_USERNAME }}
           password: ${{ secrets.DOCKER_PASSWORD }}
 
       - name: Build and push image
         id: build
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7.2.0
         with:
           labels: |
             org.opencontainers.image.authors=${{ github.repository_owner }}
@@ -162,14 +162,49 @@ jobs:
             local image_ref="$1"
 
             echo "Verifying ${image_ref}"
-            resolved_digest="$(docker buildx imagetools inspect "${image_ref}" | awk '/^Digest:/ { print $2; exit }')"
+
+            resolved_digest=""
+            for attempt in $(seq 1 12); do
+              if inspect_output="$(docker buildx imagetools inspect "${image_ref}" 2>&1)"; then
+                resolved_digest="$(awk '/^Digest:/ { print $2; exit }' <<< "${inspect_output}")"
+                if [ -n "${resolved_digest}" ]; then
+                  break
+                fi
+              fi
+
+              echo "Manifest for ${image_ref} is not inspectable yet (attempt ${attempt}/12)."
+              if [ "${attempt}" -eq 12 ]; then
+                echo "${inspect_output:-docker buildx imagetools inspect produced no output}" >&2
+                exit 1
+              fi
+              sleep 15
+            done
+
             if [ "${resolved_digest}" != "${IMAGE_DIGEST}" ]; then
               echo "digest mismatch for ${image_ref}: expected ${IMAGE_DIGEST}, got ${resolved_digest}" >&2
               exit 1
             fi
 
-            docker buildx imagetools inspect --raw "${image_ref}" \
-              | EXPECTED_PLATFORMS="${EXPECTED_PLATFORMS}" python3 /tmp/verify_manifest.py
+            raw_manifest_file="$(mktemp)"
+            raw_manifest_error_file="$(mktemp)"
+            for attempt in $(seq 1 12); do
+              if docker buildx imagetools inspect --raw "${image_ref}" > "${raw_manifest_file}" 2> "${raw_manifest_error_file}" \
+                && EXPECTED_PLATFORMS="${EXPECTED_PLATFORMS}" python3 /tmp/verify_manifest.py < "${raw_manifest_file}"; then
+                rm -f "${raw_manifest_file}" "${raw_manifest_error_file}"
+                return
+              fi
+
+              echo "Raw manifest for ${image_ref} is not verifiable yet (attempt ${attempt}/12)."
+              if [ "${attempt}" -eq 12 ]; then
+                echo "docker buildx imagetools inspect --raw stderr:" >&2
+                cat "${raw_manifest_error_file}" >&2 || true
+                echo "raw manifest stdout:" >&2
+                cat "${raw_manifest_file}" >&2 || true
+                rm -f "${raw_manifest_file}" "${raw_manifest_error_file}"
+                exit 1
+              fi
+              sleep 15
+            done
           }
 
           while IFS= read -r image_ref; do
@@ -178,7 +213,7 @@ jobs:
           done <<< "${IMAGE_TAGS}"
 
       - name: Install cosign
-        uses: sigstore/cosign-installer@v3
+        uses: sigstore/cosign-installer@v4.1.2
 
       - name: Sign published image digests
         env:
