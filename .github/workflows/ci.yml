@@ -33,7 +33,7 @@ jobs:
           ACTIONLINT_VERSION: '1.7.12'
         run: |
           set -euo pipefail
-          curl -fsSLo /tmp/actionlint.tar.gz \
+          curl --retry 5 --retry-delay 5 --retry-all-errors -fsSLo /tmp/actionlint.tar.gz \
             "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
           tar -xzf /tmp/actionlint.tar.gz -C /tmp actionlint
           sudo install -m 0755 /tmp/actionlint /usr/local/bin/actionlint
