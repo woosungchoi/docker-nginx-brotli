@@ -28,5 +28,34 @@ jobs:
       - name: Check nginx version
         run: docker run --rm nginx-http3:smoke nginx -v
 
-      - name: Test nginx configuration
+      - name: Test default nginx configuration
         run: docker run --rm nginx-http3:smoke nginx -t
+
+      - name: Test recommended nginx configuration
+        run: docker run --rm -v "${PWD}/nginx.conf:/etc/nginx/nginx.conf:ro" nginx-http3:smoke nginx -t
+
+      - name: Test HTTP/3 example configuration
+        run: docker run --rm -v "${PWD}/h3.nginx.conf:/etc/nginx/conf.d/h3.nginx.conf:ro" nginx-http3:smoke nginx -t
+
+      - name: Test HTTP response
+        run: |
+          set -euo pipefail
+          container_id=$(docker run -d -p 127.0.0.1::80 nginx-http3:smoke)
+          trap 'docker rm -f "${container_id}" >/dev/null 2>&1 || true' EXIT
+
+          host_port=$(docker port "${container_id}" 80/tcp | sed -E 's/^.*:([0-9]+)$/\1/')
+          status=""
+          for attempt in $(seq 1 30); do
+            status=$(curl -sS -o /tmp/nginx-smoke-response.html -w '%{http_code}' "http://127.0.0.1:${host_port}/" || true)
+            case "${status}" in
+              2*|3*|4*) break ;;
+            esac
+
+            if [ "${attempt}" -eq 30 ]; then
+              docker logs "${container_id}" >&2 || true
+              exit 1
+            fi
+            sleep 1
+          done
+
+          echo "HTTP smoke status: ${status}"

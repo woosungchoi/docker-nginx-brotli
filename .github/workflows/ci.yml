@@ -1,0 +1,125 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches:
+      - master
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  workflow-and-source-checks:
+    name: workflow and source checks
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6.0.3
+
+      - name: Set up Python
+        uses: actions/setup-python@v6.2.0
+        with:
+          python-version: '3.x'
+
+      - name: Validate workflow YAML syntax
+        run: |
+          set -euo pipefail
+          ruby -e 'ARGV.each { |path| require "yaml"; YAML.load_file(path); puts "yaml ok: #{path}" }' .github/workflows/*.yml
+
+      - name: Install actionlint
+        env:
+          ACTIONLINT_VERSION: '1.7.12'
+        run: |
+          set -euo pipefail
+          curl -fsSLo /tmp/actionlint.tar.gz \
+            "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          tar -xzf /tmp/actionlint.tar.gz -C /tmp actionlint
+          sudo install -m 0755 /tmp/actionlint /usr/local/bin/actionlint
+          actionlint -version
+
+      - name: Lint GitHub Actions workflows
+        run: actionlint .github/workflows/*.yml
+
+      - name: Guard against Node 20-based action versions
+        run: |
+          set -euo pipefail
+          if grep -RInE 'uses: (actions/checkout@v[1-5]|actions/setup-python@v[1-5]|docker/setup-buildx-action@v[1-3]|docker/build-push-action@v[1-6]|peter-evans/create-pull-request@v[1-7])([^0-9.]|$)' .github/workflows; then
+            echo "Found GitHub Action pins known to run on deprecated Node.js runtimes." >&2
+            exit 1
+          fi
+
+      - name: Compile Python scripts
+        run: python3 -m py_compile scripts/update_versions.py
+
+      - name: Check dependency updater dry run
+        run: python3 scripts/update_versions.py --dry-run
+
+      - name: Regression test Dockerfile ENV pin parser
+        run: |
+          python3 - <<'PY'
+          from scripts.update_versions import extract_current_versions, replace_versions
+
+          samples = [
+              "ENV NGINX_VERSION=1.0.0\nENV PCRE_VERSION=10.0\nENV ZLIB_VERSION=1.2.3\n",
+              "ENV NGINX_VERSION 1.0.0\nENV PCRE_VERSION 10.0\nENV ZLIB_VERSION 1.2.3\n",
+          ]
+          replacement = {
+              "NGINX_VERSION": "1.30.2",
+              "PCRE_VERSION": "10.47",
+              "ZLIB_VERSION": "1.3.2",
+          }
+
+          for text in samples:
+              assert extract_current_versions(text) == {
+                  "NGINX_VERSION": "1.0.0",
+                  "PCRE_VERSION": "10.0",
+                  "ZLIB_VERSION": "1.2.3",
+              }
+              updated = replace_versions(text, replacement)
+              assert "1.30.2" in updated
+              assert "10.47" in updated
+              assert "1.3.2" in updated
+
+          print("Dockerfile ENV pin parser regression checks passed.")
+          PY
+
+      - name: Check shell hook syntax
+        run: bash -n hooks/build hooks/push
+
+      - name: Install ShellCheck
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends shellcheck
+
+      - name: Lint shell hooks
+        run: shellcheck hooks/build hooks/push
+
+      - name: Check Dockerfile with BuildKit
+        run: docker buildx build --check --file Dockerfile .
+
+      - name: Lint Dockerfile with Hadolint
+        run: docker run --rm -i hadolint/hadolint:v2.14.0 hadolint --failure-threshold error - < Dockerfile
+
+  trivy-repository-scan:
+    name: trivy repository scan
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6.0.3
+
+      - name: Scan repository configuration and secrets
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          scanners: misconfig,secret
+          severity: HIGH,CRITICAL
+          exit-code: '1'
+          ignore-unfixed: true
+          trivyignores: .trivyignore
+          format: table
