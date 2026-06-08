@@ -32,9 +32,9 @@ USER_AGENT = "docker-nginx-brotli-version-updater/1.0"
 TIMEOUT_SECONDS = 30
 
 VERSION_PATTERNS = {
-    "NGINX_VERSION": re.compile(r"^(ENV\s+NGINX_VERSION\s+)(\S+)(\s*)$", re.MULTILINE),
-    "PCRE_VERSION": re.compile(r"^(ENV\s+PCRE_VERSION\s+)(\S+)(\s*)$", re.MULTILINE),
-    "ZLIB_VERSION": re.compile(r"^(ENV\s+ZLIB_VERSION\s+)(\S+)(\s*)$", re.MULTILINE),
+    "NGINX_VERSION": re.compile(r"^(ENV\s+NGINX_VERSION(?:\s+|=))(\S+)(\s*)$", re.MULTILINE),
+    "PCRE_VERSION": re.compile(r"^(ENV\s+PCRE_VERSION(?:\s+|=))(\S+)(\s*)$", re.MULTILINE),
+    "ZLIB_VERSION": re.compile(r"^(ENV\s+ZLIB_VERSION(?:\s+|=))(\S+)(\s*)$", re.MULTILINE),
 }
 
 
