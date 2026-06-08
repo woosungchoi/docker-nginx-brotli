@@ -114,8 +114,8 @@ jobs:
           BASE_DOCKERFILE=$(git show "origin/$BASE_REF:Dockerfile")
           HEAD_DOCKERFILE=$(git show "origin/$HEAD_REF:Dockerfile")
 
-          old_nginx=$(printf '%s\n' "$BASE_DOCKERFILE" | awk '/^ENV NGINX_VERSION / {print $3}')
-          new_nginx=$(printf '%s\n' "$HEAD_DOCKERFILE" | awk '/^ENV NGINX_VERSION / {print $3}')
+          old_nginx=$(printf '%s\n' "$BASE_DOCKERFILE" | sed -nE 's/^ENV[[:space:]]+NGINX_VERSION([[:space:]]+|=)([^[:space:]]+).*/\2/p')
+          new_nginx=$(printf '%s\n' "$HEAD_DOCKERFILE" | sed -nE 's/^ENV[[:space:]]+NGINX_VERSION([[:space:]]+|=)([^[:space:]]+).*/\2/p')
 
           if [ -z "$old_nginx" ] || [ -z "$new_nginx" ]; then
             echo "manual=true" >> "$GITHUB_OUTPUT"
