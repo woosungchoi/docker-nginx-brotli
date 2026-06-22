@@ -6,17 +6,28 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
-  pull-requests: write
-  issues: write
-  actions: write
+  contents: read
 
 jobs:
   update-versions:
     runs-on: ubuntu-latest
     steps:
+      - name: Create GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ vars.DEPENDENCY_UPDATE_APP_ID }}
+          private-key: ${{ secrets.DEPENDENCY_UPDATE_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: docker-nginx-brotli
+          permission-contents: write
+          permission-pull-requests: write
+          permission-issues: write
+
       - name: Check out repository
         uses: actions/checkout@v6.0.3
+        with:
+          token: ${{ steps.app-token.outputs.token }}
 
       - name: Set up Python
         uses: actions/setup-python@v6.2.0
@@ -30,7 +41,7 @@ jobs:
         id: cpr
         uses: peter-evans/create-pull-request@v8.1.1
         with:
-          token: ${{ secrets.GITHUB_TOKEN }}
+          token: ${{ steps.app-token.outputs.token }}
           commit-message: 'chore: update nginx, pcre2, and zlib versions'
           title: 'chore: update nginx, pcre2, and zlib versions'
           body: |
@@ -48,55 +59,11 @@ jobs:
             dependencies
             automated pr
 
-      - name: Start smoke test for dependency PR
-        if: steps.cpr.outputs.pull-request-number != ''
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          REPO: ${{ github.repository }}
-          BRANCH: ci/update-pinned-versions
-        run: |
-          gh workflow run smoke-test.yml --repo "$REPO" --ref "$BRANCH"
-
-      - name: Wait for smoke test to pass
-        if: steps.cpr.outputs.pull-request-number != ''
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          REPO: ${{ github.repository }}
-          BRANCH: ci/update-pinned-versions
-          HEAD_SHA: ${{ steps.cpr.outputs.pull-request-head-sha }}
-        run: |
-          set -euo pipefail
-
-          RUN_ID=""
-          for attempt in $(seq 1 30); do
-            RUN_ID=$(gh run list \
-              --repo "$REPO" \
-              --workflow smoke-test.yml \
-              --branch "$BRANCH" \
-              --event workflow_dispatch \
-              --json databaseId,headSha,createdAt \
-              --jq "map(select(.headSha == \"$HEAD_SHA\")) | sort_by(.createdAt) | reverse | .[0].databaseId // empty")
-
-            if [ -n "$RUN_ID" ]; then
-              break
-            fi
-
-            echo "Waiting for smoke-test run for $HEAD_SHA (attempt $attempt/30)..."
-            sleep 10
-          done
-
-          if [ -z "$RUN_ID" ]; then
-            echo "Could not find a smoke-test workflow_dispatch run for $HEAD_SHA."
-            exit 1
-          fi
-
-          gh run watch "$RUN_ID" --repo "$REPO" --exit-status --interval 30
-
       - name: Check whether nginx stable branch changed
         id: policy
         if: steps.cpr.outputs.pull-request-number != ''
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
           REPO: ${{ github.repository }}
           PR_NUMBER: ${{ steps.cpr.outputs.pull-request-number }}
         run: |
@@ -137,22 +104,22 @@ jobs:
       - name: Leave manual-review comment
         if: steps.cpr.outputs.pull-request-number != '' && steps.policy.outputs.manual == 'true'
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
           REPO: ${{ github.repository }}
           PR_NUMBER: ${{ steps.cpr.outputs.pull-request-number }}
           REASON: ${{ steps.policy.outputs.reason }}
         run: |
-          gh pr comment "$PR_NUMBER" --repo "$REPO" --body "Smoke test passed, but this dependency PR requires manual merge because ${REASON}"
+          gh pr comment "$PR_NUMBER" --repo "$REPO" --body "This dependency PR requires manual merge because ${REASON}"
 
       - name: Auto-merge dependency PR
         if: steps.cpr.outputs.pull-request-number != '' && steps.policy.outputs.manual == 'false'
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
           REPO: ${{ github.repository }}
           PR_NUMBER: ${{ steps.cpr.outputs.pull-request-number }}
           REASON: ${{ steps.policy.outputs.reason }}
         run: |
           set -euo pipefail
-          gh pr merge "$PR_NUMBER" --repo "$REPO" --squash --delete-branch \
+          gh pr merge "$PR_NUMBER" --repo "$REPO" --auto --squash --delete-branch \
             --subject "chore: update nginx, pcre2, and zlib versions" \
-            --body "Automatically merged dependency update after smoke-test passed. ${REASON}"
+            --body "Automatically merge dependency update after required checks pass. ${REASON}"
