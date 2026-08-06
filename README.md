@@ -66,18 +66,21 @@ The workflow always logs in to GHCR and publishes these GHCR tags:
 
 Release images are intentionally tied to immutable commit SHA tags as well as `latest`. After publishing, the workflow verifies that every GHCR and optional Docker Hub mirror tag resolves to the build output digest and includes all expected platforms (`linux/amd64`, `linux/arm64`, `linux/arm/v6`, and `linux/arm/v7`). It also emits BuildKit SBOM/provenance attestations and uses GitHub OIDC keyless cosign signing for the published image digest. GitHub Releases are optional for this image-first repository; if release notes are needed, create a release that references the published image digest and short SHA.
 
-If both repository secrets below are configured, the workflow also logs in to Docker Hub and mirrors the same tags to the legacy Docker Hub repository name:
+If both repository secrets below are configured and the workflow is running from `refs/heads/master`, it also logs in to Docker Hub and mirrors the release to the legacy Docker Hub repository name:
 
 - `DOCKER_USERNAME`
-- `DOCKER_PASSWORD`
+- `DOCKER_PASSWORD` (a Docker Hub PAT with read, write, and delete permission)
 
-Mirrored Docker Hub tags:
+Docker Hub retains exactly these two tags after each **approved retention cleanup**:
 
-- `<DOCKER_USERNAME>/docker-nginx-brotli:latest`
-- `<DOCKER_USERNAME>/docker-nginx-brotli:<branch-or-tag>`
-- `<DOCKER_USERNAME>/docker-nginx-brotli:<short-sha>`
+- `woosungchoi/docker-nginx-brotli:latest`
+- `woosungchoi/docker-nginx-brotli:<current-short-sha>`
 
-If either secret is missing, the workflow skips Docker Hub login and Docker Hub pushes entirely while continuing to publish to GHCR.
+The publishing job never performs a destructive cleanup. After manifest verification and cosign signing, it runs `scripts/cleanup_dockerhub_tags.py` in dry-run mode, uploads the exact plan as evidence, and then pauses the same trusted `master` workflow at the protected `dockerhub-cleanup` environment. Only after the required environment review does a separate least-privilege cleanup job receive Docker Hub credentials and apply that hash-bound plan. Approving the deployment is also the operator's acknowledgement that all external Docker Hub writers are frozen for the short apply transaction.
+
+The workflow-level `publish-image` concurrency lease remains held through approval and cleanup, so another repository publish cannot overlap the mutation. The dry-run artifact already contains exact manifest bytes for every original digest, making rollback material durable before approval or mutation. Apply revalidates those bytes and registry-native tag/digest inventory immediately before each digest deletion; a partial failure or termination attempts to restore the original inventory without deleting any unplanned tag. Every older seven-character SHA must also remain addressable by exact digest in `ghcr.io/woosungchoi/nginx-http3`. GHCR keeps the historical SHA tags for rollback.
+
+If either Docker Hub secret is missing, Docker Hub mirroring and its cleanup job are skipped while GHCR publishing continues. A configured username other than the fixed `woosungchoi` namespace fails before publishing. The image workflow is triggered only by pushes to `master`; it has no branch-selectable manual trigger.
 
 ## Automated version pin updates
 
