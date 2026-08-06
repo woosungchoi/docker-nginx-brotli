@@ -66,18 +66,19 @@ The workflow always logs in to GHCR and publishes these GHCR tags:
 
 Release images are intentionally tied to immutable commit SHA tags as well as `latest`. After publishing, the workflow verifies that every GHCR and optional Docker Hub mirror tag resolves to the build output digest and includes all expected platforms (`linux/amd64`, `linux/arm64`, `linux/arm/v6`, and `linux/arm/v7`). It also emits BuildKit SBOM/provenance attestations and uses GitHub OIDC keyless cosign signing for the published image digest. GitHub Releases are optional for this image-first repository; if release notes are needed, create a release that references the published image digest and short SHA.
 
-If both repository secrets below are configured, the workflow also logs in to Docker Hub and mirrors the same tags to the legacy Docker Hub repository name:
+If both repository secrets below are configured and the workflow is running from `refs/heads/master`, it also logs in to Docker Hub and mirrors the release to the legacy Docker Hub repository name:
 
 - `DOCKER_USERNAME`
-- `DOCKER_PASSWORD`
+- `DOCKER_PASSWORD` (a Docker Hub PAT with read, write, and delete permission)
 
-Mirrored Docker Hub tags:
+Docker Hub retains exactly these two tags after each successful release:
 
-- `<DOCKER_USERNAME>/docker-nginx-brotli:latest`
-- `<DOCKER_USERNAME>/docker-nginx-brotli:<branch-or-tag>`
-- `<DOCKER_USERNAME>/docker-nginx-brotli:<short-sha>`
+- `woosungchoi/docker-nginx-brotli:latest`
+- `woosungchoi/docker-nginx-brotli:<current-short-sha>`
 
-If either secret is missing, the workflow skips Docker Hub login and Docker Hub pushes entirely while continuing to publish to GHCR.
+After manifest verification and cosign signing, `scripts/cleanup_dockerhub_tags.py` verifies that every older seven-character SHA tag has an exact-digest copy in `ghcr.io/woosungchoi/nginx-http3`, then deletes the archived Docker Hub manifest by digest rather than deleting a mutable tag name. This preserves a tag if another writer retargets it between validation and mutation. An unknown tag name, protected-digest sharing, digest drift, missing archive, credential failure, or live inventory change stops cleanup. GHCR keeps the historical SHA tags for rollback.
+
+If either secret is missing, or the workflow is dispatched from a ref other than the default branch, it skips Docker Hub login, publishing, and cleanup while continuing to publish to GHCR. A configured username other than the fixed `woosungchoi` namespace fails before publishing.
 
 ## Automated version pin updates
 

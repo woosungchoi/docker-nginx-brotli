@@ -7,7 +7,8 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: publish-${{ github.ref }}
+  # One writer lease covers every ref so GHCR archive verification and Docker Hub mutation cannot race another publish run.
+  group: publish-image
   cancel-in-progress: false
 
 permissions:
@@ -17,6 +18,7 @@ permissions:
 
 env:
   IMG: nginx-http3
+  DOCKERHUB_NAMESPACE: woosungchoi
   DOCKERHUB_IMG: docker-nginx-brotli
 
 jobs:
@@ -25,7 +27,9 @@ jobs:
     timeout-minutes: 120
     steps:
       - name: Check out repository
-        uses: actions/checkout@v6.0.3
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
 
       - name: Set environment variables
         env:
@@ -33,6 +37,7 @@ jobs:
           DOCKER_USERNAME: ${{ secrets.DOCKER_USERNAME }}
           DOCKER_PASSWORD: ${{ secrets.DOCKER_PASSWORD }}
         run: |
+          set -euo pipefail
           BUILD_DATE=$(date -u +'%Y-%m-%dT%H:%M:%SZ')
           GIT_SHA=$(echo '${{ github.sha }}' | cut -c1-7)
           GIT_REF=$(git symbolic-ref -q --short HEAD || git describe --tags --exact-match || echo "${GITHUB_REF_NAME}")
@@ -45,7 +50,11 @@ jobs:
             PUBLISH_REF_TAG=true
           fi
 
-          if [ -n "$DOCKER_USERNAME" ] && [ -n "$DOCKER_PASSWORD" ]; then
+          if [ "${GITHUB_REF}" = "refs/heads/master" ] && [ -n "$DOCKER_USERNAME" ] && [ -n "$DOCKER_PASSWORD" ]; then
+            if [ "$DOCKER_USERNAME" != "$DOCKERHUB_NAMESPACE" ]; then
+              echo "Docker Hub username does not match ${DOCKERHUB_NAMESPACE}." >&2
+              exit 1
+            fi
             HAS_DOCKERHUB=true
           else
             HAS_DOCKERHUB=false
@@ -70,23 +79,23 @@ jobs:
             fi
             echo "${GHCR_IMAGE}:${GIT_SHA}"
             if [ "$HAS_DOCKERHUB" = "true" ]; then
-              echo "${DOCKER_USERNAME}/${DOCKERHUB_IMG}:latest"
+              echo "${DOCKERHUB_NAMESPACE}/${DOCKERHUB_IMG}:latest"
               if [ "$PUBLISH_REF_TAG" = "true" ]; then
-                echo "${DOCKER_USERNAME}/${DOCKERHUB_IMG}:${GIT_REF}"
+                echo "${DOCKERHUB_NAMESPACE}/${DOCKERHUB_IMG}:${GIT_REF}"
               fi
-              echo "${DOCKER_USERNAME}/${DOCKERHUB_IMG}:${GIT_SHA}"
+              echo "${DOCKERHUB_NAMESPACE}/${DOCKERHUB_IMG}:${GIT_SHA}"
             fi
             echo 'EOF'
           } >> "$GITHUB_ENV"
 
       - name: Set up QEMU
-        uses: docker/setup-qemu-action@v4.1.0
+        uses: docker/setup-qemu-action@06116385d9baf250c9f4dcb4858b16962ea869c3 # v4.1.0
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4.1.0
+        uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # v4.1.0
 
       - name: Log in to GitHub Container Registry
-        uses: docker/login-action@v4.2.0
+        uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4.2.0
         with:
           registry: ghcr.io
           username: ${{ github.repository_owner }}
@@ -94,14 +103,14 @@ jobs:
 
       - name: Log in to Docker Hub
         if: env.HAS_DOCKERHUB == 'true'
-        uses: docker/login-action@v4.2.0
+        uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4.2.0
         with:
           username: ${{ secrets.DOCKER_USERNAME }}
           password: ${{ secrets.DOCKER_PASSWORD }}
 
       - name: Build and push image
         id: build
-        uses: docker/build-push-action@v7.2.0
+        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0
         with:
           labels: |
             org.opencontainers.image.authors=${{ github.repository_owner }}
@@ -220,7 +229,7 @@ jobs:
           done <<< "${IMAGE_TAGS}"
 
       - name: Install cosign
-        uses: sigstore/cosign-installer@v4.1.2
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
 
       - name: Sign published image digests
         env:
@@ -240,3 +249,28 @@ jobs:
             cosign sign --yes "${repository}@${IMAGE_DIGEST}"
             signed_repositories="${signed_repositories} ${repository}"
           done <<< "${IMAGE_TAGS}"
+
+      - name: Retain only latest and current SHA on Docker Hub
+        id: dockerhub_cleanup
+        if: env.HAS_DOCKERHUB == 'true' && github.ref == 'refs/heads/master'
+        env:
+          DOCKER_USERNAME: ${{ secrets.DOCKER_USERNAME }}
+          DOCKER_PASSWORD: ${{ secrets.DOCKER_PASSWORD }}
+          IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          python3 scripts/cleanup_dockerhub_tags.py \
+            --expected-tag "${GIT_SHA}" \
+            --expected-digest "${IMAGE_DIGEST}" \
+            --apply \
+            --confirm DELETE-OLD-DOCKERHUB-SHA-TAGS \
+            --report "${RUNNER_TEMP}/dockerhub-tag-cleanup.json"
+
+      - name: Upload Docker Hub cleanup evidence
+        if: ${{ always() && steps.dockerhub_cleanup.outcome != 'skipped' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: dockerhub-tag-cleanup-${{ env.GIT_SHA }}-${{ github.run_id }}
+          path: ${{ runner.temp }}/dockerhub-tag-cleanup.json
+          if-no-files-found: error
+          retention-days: 90
