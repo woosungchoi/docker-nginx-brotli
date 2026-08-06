@@ -35,6 +35,8 @@ jobs:
           python-version: '3.x'
 
       - name: Resolve latest upstream versions
+        env:
+          GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
         run: python3 scripts/update_versions.py
 
       - name: Create pull request if Dockerfile changed

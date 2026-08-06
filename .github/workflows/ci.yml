@@ -53,10 +53,15 @@ jobs:
       - name: Compile Python scripts
         run: python3 -m py_compile scripts/update_versions.py scripts/cleanup_dockerhub_tags.py
 
-      - name: Test Docker Hub tag cleanup safety contract
-        run: python3 -m unittest -v tests.test_cleanup_dockerhub_tags
+      - name: Test Python safety contracts
+        run: |
+          python3 -m unittest -v \
+            tests.test_cleanup_dockerhub_tags \
+            tests.test_update_versions
 
       - name: Check dependency updater dry run
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         run: python3 scripts/update_versions.py --dry-run
 
       - name: Regression test Dockerfile ENV pin parser

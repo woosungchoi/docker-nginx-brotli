@@ -17,12 +17,14 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import sys
 import urllib.error
+import urllib.parse
 import urllib.request
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Dict, Iterable, Tuple
 
 NGINX_DOWNLOAD_URL = "https://nginx.org/download/"
 PCRE2_RELEASE_URL = "https://api.github.com/repos/PCRE2Project/pcre2/releases/latest"
@@ -43,7 +45,18 @@ class UpdateError(RuntimeError):
 
 
 def fetch_text(url: str) -> str:
-    request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+    headers = {"User-Agent": USER_AGENT}
+    if urllib.parse.urlsplit(url).hostname == "api.github.com":
+        headers.update(
+            {
+                "Accept": "application/vnd.github+json",
+                "X-GitHub-Api-Version": "2022-11-28",
+            }
+        )
+        token = os.environ.get("GITHUB_TOKEN", "")
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+    request = urllib.request.Request(url, headers=headers)
     try:
         with urllib.request.urlopen(request, timeout=TIMEOUT_SECONDS) as response:
             return response.read().decode("utf-8")
@@ -55,7 +68,7 @@ def fetch_json(url: str) -> dict:
     return json.loads(fetch_text(url))
 
 
-def parse_semver(version: str) -> Tuple[int, ...]:
+def parse_semver(version: str) -> tuple[int, ...]:
     try:
         return tuple(int(part) for part in version.split("."))
     except ValueError as exc:
@@ -86,8 +99,8 @@ def latest_github_release_version(url: str, *, prefix_to_strip: str = "") -> str
     return tag_name
 
 
-def extract_current_versions(text: str) -> Dict[str, str]:
-    versions: Dict[str, str] = {}
+def extract_current_versions(text: str) -> dict[str, str]:
+    versions: dict[str, str] = {}
     for key, pattern in VERSION_PATTERNS.items():
         match = pattern.search(text)
         if not match:
@@ -96,7 +109,7 @@ def extract_current_versions(text: str) -> Dict[str, str]:
     return versions
 
 
-def replace_versions(text: str, versions: Dict[str, str]) -> str:
+def replace_versions(text: str, versions: dict[str, str]) -> str:
     updated = text
     for key, value in versions.items():
         pattern = VERSION_PATTERNS[key]
@@ -110,7 +123,9 @@ def replace_versions(text: str, versions: Dict[str, str]) -> str:
     return updated
 
 
-def format_version_summary(current: Dict[str, str], latest: Dict[str, str]) -> Iterable[str]:
+def format_version_summary(
+    current: dict[str, str], latest: dict[str, str]
+) -> Iterable[str]:
     for key in ("NGINX_VERSION", "PCRE_VERSION", "ZLIB_VERSION"):
         status = "unchanged" if current[key] == latest[key] else "updated"
         yield f"{key}: {current[key]} -> {latest[key]} ({status})"
