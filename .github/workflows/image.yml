@@ -6,7 +6,7 @@ on:
       - master
 
 concurrency:
-  # One lease is held across the publish and approved cleanup jobs.
+  # Serialize repository publishers. This does not fence external Docker Hub writers.
   group: publish-image
   cancel-in-progress: false
 
@@ -26,10 +26,6 @@ jobs:
       contents: read
       packages: write
       id-token: write
-    outputs:
-      expected_tag: ${{ steps.release_identity.outputs.expected_tag }}
-      expected_digest: ${{ steps.dockerhub_retention_plan.outputs.expected_digest }}
-      plan_sha256: ${{ steps.dockerhub_retention_plan.outputs.plan_sha256 }}
     steps:
       - name: Check out repository
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
@@ -37,7 +33,6 @@ jobs:
           persist-credentials: false
 
       - name: Set environment variables
-        id: release_identity
         env:
           REPO_OWNER: ${{ github.repository_owner }}
           DOCKER_USERNAME: ${{ secrets.DOCKER_USERNAME }}
@@ -76,10 +71,6 @@ jobs:
             echo "HAS_DOCKERHUB=${HAS_DOCKERHUB}"
             echo "PUBLISH_REF_TAG=${PUBLISH_REF_TAG}"
           } >> "$GITHUB_ENV"
-
-          {
-            echo "expected_tag=${GIT_SHA}"
-          } >> "$GITHUB_OUTPUT"
 
           {
             echo 'IMAGE_TAGS<<EOF'
@@ -271,115 +262,20 @@ jobs:
             --expected-tag "${GIT_SHA}" \
             --expected-digest "${IMAGE_DIGEST}" \
             --report "${RUNNER_TEMP}/dockerhub-retention-plan.json"
-          PLAN_SHA256="$(sha256sum "${RUNNER_TEMP}/dockerhub-retention-plan.json" | cut -d' ' -f1)"
-          {
-            echo "expected_digest=${IMAGE_DIGEST}"
-            echo "plan_sha256=${PLAN_SHA256}"
-          } >> "${GITHUB_OUTPUT}"
+          (
+            cd "${RUNNER_TEMP}"
+            sha256sum dockerhub-retention-plan.json \
+              > dockerhub-retention-plan.json.sha256
+          )
+          cat "${RUNNER_TEMP}/dockerhub-retention-plan.json.sha256"
 
       - name: Upload Docker Hub retention plan
         if: ${{ always() && steps.dockerhub_retention_plan.outcome != 'skipped' }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: dockerhub-retention-plan-${{ env.GIT_SHA }}-${{ github.run_id }}
-          path: ${{ runner.temp }}/dockerhub-retention-plan.json
+          path: |
+            ${{ runner.temp }}/dockerhub-retention-plan.json
+            ${{ runner.temp }}/dockerhub-retention-plan.json.sha256
           if-no-files-found: error
-          retention-days: 90
-
-  cleanup:
-    name: Apply approved Docker Hub retention
-    needs: build
-    if: ${{ needs.build.outputs.plan_sha256 != '' }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    environment: dockerhub-cleanup
-    permissions:
-      contents: read
-    steps:
-      - name: Check out the exact planned source
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
-        with:
-          ref: ${{ github.sha }}
-          persist-credentials: false
-
-      - name: Download the exact plan artifact
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: dockerhub-retention-plan-${{ needs.build.outputs.expected_tag }}-${{ github.run_id }}
-          path: ${{ runner.temp }}/approved-plan
-
-      - name: Verify plan artifact hash
-        env:
-          PLAN_SHA256: ${{ needs.build.outputs.plan_sha256 }}
-        run: |
-          set -euo pipefail
-          printf '%s  %s\n' \
-            "${PLAN_SHA256}" \
-            "${RUNNER_TEMP}/approved-plan/dockerhub-retention-plan.json" \
-            | sha256sum -c -
-
-      - name: Apply exact approved plan
-        id: apply_cleanup
-        env:
-          DOCKER_USERNAME: ${{ secrets.DOCKER_USERNAME }}
-          DOCKER_PASSWORD: ${{ secrets.DOCKER_PASSWORD }}
-          EXPECTED_TAG: ${{ needs.build.outputs.expected_tag }}
-          EXPECTED_DIGEST: ${{ needs.build.outputs.expected_digest }}
-          PLAN_SHA256: ${{ needs.build.outputs.plan_sha256 }}
-        run: |
-          set -euo pipefail
-          python3 scripts/cleanup_dockerhub_tags.py \
-            --expected-tag "${EXPECTED_TAG}" \
-            --expected-digest "${EXPECTED_DIGEST}" \
-            --approved-plan "${RUNNER_TEMP}/approved-plan/dockerhub-retention-plan.json" \
-            --approved-plan-sha256 "${PLAN_SHA256}" \
-            --apply \
-            --confirm DELETE-OLD-DOCKERHUB-SHA-TAGS \
-            --writer-freeze I-CONFIRM-DOCKERHUB-WRITERS-ARE-FROZEN \
-            --report "${RUNNER_TEMP}/dockerhub-retention-apply.json"
-
-      - name: Recover original inventory after an interrupted or failed mutation
-        if: ${{ failure() && steps.apply_cleanup.outcome == 'failure' }}
-        env:
-          DOCKER_USERNAME: ${{ secrets.DOCKER_USERNAME }}
-          DOCKER_PASSWORD: ${{ secrets.DOCKER_PASSWORD }}
-        run: |
-          set -euo pipefail
-          REPORT="${RUNNER_TEMP}/dockerhub-retention-apply.json"
-          BASELINE="${RUNNER_TEMP}/approved-plan/dockerhub-retention-plan.json"
-          python3 - "${REPORT}" "${BASELINE}" <<'PY'
-          import json
-          import pathlib
-          import shutil
-          import sys
-
-          report_path = pathlib.Path(sys.argv[1])
-          baseline_path = pathlib.Path(sys.argv[2])
-          use_baseline = not report_path.is_file()
-          if not use_baseline:
-              try:
-                  report = json.loads(report_path.read_text())
-              except (OSError, json.JSONDecodeError):
-                  use_baseline = True
-              else:
-                  use_baseline = not (
-                      report.get("rollback_inventory")
-                      and report.get("rollback_manifests")
-                  )
-          if use_baseline:
-              shutil.copyfile(baseline_path, report_path)
-          PY
-          python3 scripts/cleanup_dockerhub_tags.py \
-            --recover \
-            --confirm DELETE-OLD-DOCKERHUB-SHA-TAGS \
-            --writer-freeze I-CONFIRM-DOCKERHUB-WRITERS-ARE-FROZEN \
-            --report "${REPORT}"
-
-      - name: Upload cleanup or recovery evidence
-        if: ${{ always() }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: dockerhub-retention-apply-${{ github.run_id }}
-          path: ${{ runner.temp }}/dockerhub-retention-apply.json
-          if-no-files-found: warn
           retention-days: 90

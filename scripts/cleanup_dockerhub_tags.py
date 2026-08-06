@@ -938,6 +938,11 @@ def recover_report(args: argparse.Namespace) -> int:
 
 
 def run(args: argparse.Namespace) -> int:
+    if args.apply or args.recover:
+        raise CleanupError(
+            "destructive Docker Hub cleanup is disabled because the registry cannot "
+            "atomically fence the complete tag reference set"
+        )
     if args.recover:
         return recover_report(args)
     if not args.expected_tag or not args.expected_digest:

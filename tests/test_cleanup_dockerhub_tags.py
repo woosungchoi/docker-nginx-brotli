@@ -16,7 +16,6 @@ from scripts.cleanup_dockerhub_tags import (
     DockerHubClient,
     GHCRArchiveClient,
     ManifestBackup,
-    _require_mutation_confirmations,
     apply_plan,
     build_plan,
     load_approved_plan,
@@ -616,29 +615,28 @@ class HttpClientTests(unittest.TestCase):
 
 
 class RunContractTests(unittest.TestCase):
-    def test_apply_refuses_before_network_without_a_hash_bound_plan(self) -> None:
+    def test_apply_is_disabled_before_report_or_network_access(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
+            report = Path(directory) / "report.json"
             args = argparse.Namespace(
                 recover=False,
                 expected_tag="abcdef0",
                 expected_digest=DIGEST_CURRENT,
-                report=Path(directory) / "report.json",
+                report=report,
                 apply=True,
                 approved_plan=None,
                 approved_plan_sha256="",
                 confirm="DELETE-OLD-DOCKERHUB-SHA-TAGS",
                 writer_freeze="I-CONFIRM-DOCKERHUB-WRITERS-ARE-FROZEN",
             )
-            with self.assertRaisesRegex(CleanupError, "hash-bound approved plan"):
+            with self.assertRaisesRegex(CleanupError, "destructive Docker Hub cleanup is disabled"):
                 run(args)
+            self.assertFalse(report.exists())
 
-    def test_mutation_requires_an_explicit_writer_freeze(self) -> None:
-        args = argparse.Namespace(
-            confirm="DELETE-OLD-DOCKERHUB-SHA-TAGS",
-            writer_freeze="",
-        )
-        with self.assertRaisesRegex(CleanupError, "writer-freeze"):
-            _require_mutation_confirmations(args)
+    def test_recovery_is_disabled_before_report_or_network_access(self) -> None:
+        args = argparse.Namespace(apply=False, recover=True)
+        with self.assertRaisesRegex(CleanupError, "destructive Docker Hub cleanup is disabled"):
+            run(args)
 
     def test_recovery_refuses_to_roll_back_a_successful_apply(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -721,28 +719,19 @@ class RunContractTests(unittest.TestCase):
 
 
 class WorkflowIntegrationTests(unittest.TestCase):
-    def test_publish_job_only_builds_a_non_destructive_plan(self) -> None:
+    def test_publish_workflow_is_audit_only(self) -> None:
         root = Path(__file__).resolve().parents[1]
         workflow = (root / ".github/workflows/image.yml").read_text()
-        build_job, cleanup_job = workflow.split("\n  cleanup:\n", maxsplit=1)
 
         self.assertNotIn("workflow_dispatch:", workflow)
-        self.assertIn("Plan Docker Hub retention", build_job)
-        self.assertNotIn("--apply", build_job)
-        self.assertIn("--apply", cleanup_job)
-
-    def test_cleanup_job_uses_same_trusted_run_and_environment_gate(self) -> None:
-        root = Path(__file__).resolve().parents[1]
-        workflow = (root / ".github/workflows/image.yml").read_text()
-
         self.assertNotIn("repository_dispatch:", workflow)
-        self.assertNotIn("workflow_dispatch:", workflow)
-        self.assertIn("environment: dockerhub-cleanup", workflow)
+        self.assertNotIn("\n  cleanup:\n", workflow)
+        self.assertNotIn("--apply", workflow)
+        self.assertNotIn("--recover", workflow)
+        self.assertNotIn("environment: dockerhub-cleanup", workflow)
         self.assertIn("group: publish-image", workflow)
-        self.assertIn("needs: build", workflow)
-        self.assertIn("--approved-plan", workflow)
-        self.assertIn("--approved-plan-sha256", workflow)
-        self.assertIn("I-CONFIRM-DOCKERHUB-WRITERS-ARE-FROZEN", workflow)
+        self.assertIn("Plan Docker Hub retention", workflow)
+        self.assertIn("dockerhub-retention-plan.json.sha256", workflow)
 
 
 if __name__ == "__main__":
