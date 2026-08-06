@@ -1,20 +1,24 @@
 #!/usr/bin/env python3
-"""Retain only ``latest`` and the current source-SHA tag on Docker Hub.
+"""Plan or apply retention of ``latest`` and the current source-SHA tag.
 
-The script is fail-closed: it accepts only seven-character lowercase Git SHA
-tags, verifies every deletion candidate has an exact-digest copy on GHCR, and
-deletes the archived manifest by digest rather than by mutable tag name. It
-re-reads the complete live tag set before each deletion and while the registry
-change converges.
+Dry-run is the default. Apply requires a hash-bound dry-run plan, an explicit
+writer-freeze acknowledgement, exact GHCR digest archives, and an authenticated
+Docker Registry token with pull/push/delete capability. Inventory comes from the
+registry rather than Docker Hub's eventually consistent UI/API count. Before
+mutation, exact manifest bytes are journaled for rollback; the complete live tag
+set is rechecked immediately before every digest deletion.
 """
 
 from __future__ import annotations
 
 import argparse
 import base64
+import binascii
+import hashlib
 import json
 import os
 import re
+import signal
 import sys
 import tempfile
 import time
@@ -22,12 +26,12 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from collections.abc import Callable, Mapping
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
 DOCKERHUB_NAMESPACE = "woosungchoi"
 DOCKERHUB_REPOSITORY = "docker-nginx-brotli"
-DOCKERHUB_API_BASE = "https://hub.docker.com"
 DOCKER_REGISTRY_AUTH = "https://auth.docker.io/token"
 DOCKER_REGISTRY_BASE = "https://registry-1.docker.io"
 GHCR_REPOSITORY = "woosungchoi/nginx-http3"
@@ -35,13 +39,29 @@ GHCR_REF_PREFIX = f"ghcr.io/{GHCR_REPOSITORY}"
 USER_AGENT = "docker-nginx-brotli-tag-cleanup/1.0"
 TIMEOUT_SECONDS = 30
 DELETE_CONFIRMATION = "DELETE-OLD-DOCKERHUB-SHA-TAGS"
+WRITER_FREEZE_CONFIRMATION = "I-CONFIRM-DOCKERHUB-WRITERS-ARE-FROZEN"
 SHA_TAG_PATTERN = re.compile(r"^[0-9a-f]{7}$")
 DIGEST_PATTERN = re.compile(r"^sha256:[0-9a-f]{64}$")
-MANIFEST_ACCEPT = (
-    "application/vnd.oci.image.index.v1+json, "
-    "application/vnd.docker.distribution.manifest.list.v2+json, "
-    "application/vnd.oci.image.manifest.v1+json, "
-    "application/vnd.docker.distribution.manifest.v2+json"
+SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
+MANIFEST_MEDIA_TYPES = frozenset(
+    {
+        "application/vnd.oci.image.index.v1+json",
+        "application/vnd.docker.distribution.manifest.list.v2+json",
+        "application/vnd.oci.image.manifest.v1+json",
+        "application/vnd.docker.distribution.manifest.v2+json",
+    }
+)
+MANIFEST_ACCEPT = ", ".join(sorted(MANIFEST_MEDIA_TYPES))
+PLAN_KEYS = (
+    "schema_version",
+    "dockerhub_repository",
+    "archive_repository",
+    "expected_tag",
+    "expected_digest",
+    "inventory",
+    "keep",
+    "delete",
+    "delete_groups",
 )
 
 
@@ -49,10 +69,21 @@ class CleanupError(RuntimeError):
     pass
 
 
+@dataclass(frozen=True)
+class ManifestBackup:
+    digest: str
+    media_type: str
+    content: bytes
+
+
 class TagClient(Protocol):
     def list_tags(self) -> list[dict[str, str]]: ...
 
     def delete_digest(self, digest: str) -> None: ...
+
+
+class RollbackClient(TagClient, Protocol):
+    def restore_tag(self, name: str, backup: ManifestBackup) -> None: ...
 
 
 def _validate_digest(value: object, *, context: str) -> str:
@@ -174,6 +205,89 @@ def build_plan(
     }
 
 
+def load_approved_report(path: Path, expected_sha256: str) -> dict[str, object]:
+    if not SHA256_PATTERN.fullmatch(expected_sha256):
+        raise CleanupError("approved plan hash is invalid")
+    try:
+        encoded = path.read_bytes()
+    except OSError as error:
+        raise CleanupError(f"approved plan could not be read: {type(error).__name__}") from None
+    actual_sha256 = hashlib.sha256(encoded).hexdigest()
+    if actual_sha256 != expected_sha256:
+        raise CleanupError("approved plan hash mismatch")
+    try:
+        payload = json.loads(encoded)
+    except json.JSONDecodeError:
+        raise CleanupError("approved plan is not valid JSON") from None
+    if not isinstance(payload, dict):
+        raise CleanupError("approved plan is not an object")
+    if payload.get("mode") != "dry-run" or payload.get("status") != "planned":
+        raise CleanupError("approved plan is not a completed dry-run plan")
+    missing = [key for key in PLAN_KEYS if key not in payload]
+    if missing:
+        raise CleanupError("approved plan is missing field(s): " + ", ".join(missing))
+    return payload
+
+
+def load_approved_plan(path: Path, expected_sha256: str) -> dict[str, object]:
+    payload = load_approved_report(path, expected_sha256)
+    return {key: payload[key] for key in PLAN_KEYS}
+
+
+def manifest_backups_to_rows(
+    backups: Mapping[str, ManifestBackup],
+) -> list[dict[str, str]]:
+    rows: list[dict[str, str]] = []
+    for digest in sorted(backups):
+        backup = backups[digest]
+        if digest != backup.digest:
+            raise CleanupError("manifest backup mapping key does not match its digest")
+        _validate_digest(digest, context="manifest backup")
+        if backup.media_type not in MANIFEST_MEDIA_TYPES:
+            raise CleanupError(f"manifest backup media type is invalid for {digest}")
+        if "sha256:" + hashlib.sha256(backup.content).hexdigest() != digest:
+            raise CleanupError(f"manifest backup content mismatch for {digest}")
+        rows.append(
+            {
+                "digest": digest,
+                "media_type": backup.media_type,
+                "content_base64": base64.b64encode(backup.content).decode("ascii"),
+            }
+        )
+    return rows
+
+
+def manifest_backups_from_rows(rows: object) -> dict[str, ManifestBackup]:
+    if not isinstance(rows, list):
+        raise CleanupError("manifest backup report is not a list")
+    backups: dict[str, ManifestBackup] = {}
+    for row in rows:
+        if not isinstance(row, dict) or set(row) != {
+            "digest",
+            "media_type",
+            "content_base64",
+        }:
+            raise CleanupError("manifest backup report contains an invalid row")
+        digest = _validate_digest(row.get("digest"), context="manifest backup report")
+        media_type = row.get("media_type")
+        encoded = row.get("content_base64")
+        if not isinstance(media_type, str) or media_type not in MANIFEST_MEDIA_TYPES:
+            raise CleanupError(f"manifest backup media type is invalid for {digest}")
+        if not isinstance(encoded, str):
+            raise CleanupError(f"manifest backup content is invalid for {digest}")
+        try:
+            content = base64.b64decode(encoded, validate=True)
+        except (ValueError, binascii.Error):
+            raise CleanupError(f"manifest backup content is invalid for {digest}") from None
+        if digest in backups:
+            raise CleanupError(f"duplicate manifest backup for {digest}")
+        backup = ManifestBackup(digest=digest, media_type=media_type, content=content)
+        if "sha256:" + hashlib.sha256(content).hexdigest() != digest:
+            raise CleanupError(f"manifest backup content mismatch for {digest}")
+        backups[digest] = backup
+    return backups
+
+
 def _require_inventory(
     actual_tags: object,
     expected: Mapping[str, str],
@@ -232,6 +346,7 @@ def apply_plan(
     *,
     verify_archive: Callable[[str, str], None] | None = None,
     on_deleted: Callable[[list[str], str, Mapping[str, str]], None] | None = None,
+    rollback: Callable[[Mapping[str, str]], None] | None = None,
     convergence_attempts: int = 24,
     sleep: Callable[[float], None] = time.sleep,
 ) -> list[dict[str, str]]:
@@ -283,35 +398,98 @@ def apply_plan(
 
     expected_remaining = dict(inventory)
     _require_inventory(client.list_tags(), expected_remaining, context="before apply")
+    mutation_attempted = False
 
-    for digest, names in normalized_groups:
-        for name in names:
-            if verify_archive is not None:
-                verify_archive(name, digest)
+    try:
+        for digest, names in normalized_groups:
+            for name in names:
+                if verify_archive is not None:
+                    verify_archive(name, digest)
 
-        before_delete = dict(expected_remaining)
-        client.delete_digest(digest)
-        for name in names:
-            del expected_remaining[name]
-        if on_deleted is not None:
-            on_deleted(names, digest, dict(expected_remaining))
-        _wait_for_inventory(
-            client,
-            before=before_delete,
-            expected=expected_remaining,
-            context=f"after deleting digest {digest}",
-            attempts=convergence_attempts,
-            sleep=sleep,
-        )
+            _require_inventory(
+                client.list_tags(),
+                expected_remaining,
+                context=f"immediately before deleting digest {digest}",
+            )
+            before_delete = dict(expected_remaining)
+            mutation_attempted = True
+            client.delete_digest(digest)
+            for name in names:
+                del expected_remaining[name]
+            if on_deleted is not None:
+                on_deleted(names, digest, dict(expected_remaining))
+            _wait_for_inventory(
+                client,
+                before=before_delete,
+                expected=expected_remaining,
+                context=f"after deleting digest {digest}",
+                attempts=convergence_attempts,
+                sleep=sleep,
+            )
 
-    if expected_remaining != keep_inventory:
-        raise CleanupError("post-delete inventory does not equal the exact keep set")
-    return inventory_rows(expected_remaining)
+        if expected_remaining != keep_inventory:
+            raise CleanupError("post-delete inventory does not equal the exact keep set")
+        return inventory_rows(expected_remaining)
+    except BaseException as error:
+        if mutation_attempted and rollback is not None:
+            try:
+                rollback(inventory)
+            except BaseException as rollback_error:
+                raise CleanupError(
+                    f"cleanup failed ({error}); rollback also failed ({rollback_error})"
+                ) from rollback_error
+        raise
+
+
+def restore_inventory(
+    client: RollbackClient,
+    original: Mapping[str, str],
+    backups: Mapping[str, ManifestBackup],
+    *,
+    stable_reads: int = 3,
+    attempts: int = 24,
+    sleep: Callable[[float], None] = time.sleep,
+) -> dict[str, str]:
+    if stable_reads < 1 or attempts < stable_reads:
+        raise CleanupError("rollback retry settings are invalid")
+
+    expected = dict(sorted(original.items()))
+    for name, digest in expected.items():
+        if name != "latest" and not SHA_TAG_PATTERN.fullmatch(name):
+            raise CleanupError(f"rollback inventory contains an unexpected tag: {name}")
+        _validate_digest(digest, context=f"rollback inventory {name}")
+        if digest not in backups:
+            raise CleanupError(f"rollback manifest backup is missing for {digest}")
+
+    stable = 0
+    for attempt in range(attempts):
+        actual = canonical_inventory(client.list_tags())
+        unexpected = sorted(set(actual) - set(expected))
+        if unexpected:
+            raise CleanupError(
+                "rollback stopped rather than deleting unexpected tag(s): " + ", ".join(unexpected)
+            )
+
+        if actual == expected:
+            stable += 1
+            if stable >= stable_reads:
+                return actual
+        else:
+            stable = 0
+            for name, digest in expected.items():
+                if actual.get(name) != digest:
+                    client.restore_tag(name, backups[digest])
+
+        if attempt + 1 < attempts:
+            sleep(5)
+
+    raise CleanupError("Docker Hub rollback did not converge to the original inventory")
 
 
 class DockerHubClient:
     def __init__(self) -> None:
         self.token: str | None = None
+        self.pull_token: str | None = None
 
     @staticmethod
     def _request_json(request: urllib.request.Request) -> object:
@@ -323,55 +501,93 @@ class DockerHubClient:
         except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as error:
             raise CleanupError(f"Docker Hub API request failed: {type(error).__name__}") from None
 
-    def list_tags(self) -> list[dict[str, str]]:
-        next_url = (
-            f"{DOCKERHUB_API_BASE}/v2/repositories/"
-            f"{DOCKERHUB_NAMESPACE}/{DOCKERHUB_REPOSITORY}/tags"
-            "?page_size=100&page=1&ordering=name"
+    def _get_pull_token(self) -> str:
+        if self.token is not None:
+            return self.token
+        if self.pull_token is not None:
+            return self.pull_token
+        repository = f"{DOCKERHUB_NAMESPACE}/{DOCKERHUB_REPOSITORY}"
+        query = urllib.parse.urlencode(
+            {
+                "service": "registry.docker.io",
+                "scope": f"repository:{repository}:pull",
+            }
         )
-        seen_urls: set[str] = set()
-        rows: list[dict[str, str]] = []
-        advertised_count: int | None = None
-
-        while next_url:
-            parsed = urllib.parse.urlparse(next_url)
-            if parsed.scheme != "https" or parsed.netloc != "hub.docker.com":
-                raise CleanupError("Docker Hub pagination returned an unexpected URL")
-            if next_url in seen_urls or len(seen_urls) >= 100:
-                raise CleanupError("Docker Hub pagination loop detected")
-            seen_urls.add(next_url)
-
-            payload = self._request_json(
-                urllib.request.Request(next_url, headers={"User-Agent": USER_AGENT})
+        payload = self._request_json(
+            urllib.request.Request(
+                f"{DOCKER_REGISTRY_AUTH}?{query}",
+                headers={"User-Agent": USER_AGENT},
             )
-            if not isinstance(payload, dict) or not isinstance(payload.get("results"), list):
-                raise CleanupError("Docker Hub tag response has an invalid schema")
-            count = payload.get("count")
-            if not isinstance(count, int) or isinstance(count, bool) or count < 0:
-                raise CleanupError("Docker Hub tag response has an invalid count")
-            if advertised_count is None:
-                advertised_count = count
-            elif count != advertised_count:
-                raise CleanupError("Docker Hub tag count changed during pagination")
+        )
+        token = payload.get("token") if isinstance(payload, dict) else None
+        if not isinstance(token, str) or not token:
+            raise CleanupError("Docker registry anonymous login response is missing a token")
+        if "pull" not in self._registry_actions(token):
+            raise CleanupError("Docker registry anonymous token is missing pull scope")
+        self.pull_token = token
+        return token
 
-            for row in payload["results"]:
-                if not isinstance(row, dict):
-                    raise CleanupError("Docker Hub tag response contains an invalid row")
-                name = row.get("name")
-                if not isinstance(name, str) or not name:
-                    raise CleanupError("Docker Hub tag response contains an invalid name")
-                digest = _validate_digest(row.get("digest"), context=name)
-                rows.append({"name": name, "digest": digest})
-
-            next_value = payload.get("next")
-            if next_value is not None and not isinstance(next_value, str):
-                raise CleanupError("Docker Hub tag response has an invalid next URL")
-            next_url = next_value or ""
-
-        if advertised_count != len(rows):
+    def list_tags(self) -> list[dict[str, str]]:
+        repository = f"{DOCKERHUB_NAMESPACE}/{DOCKERHUB_REPOSITORY}"
+        token = self._get_pull_token()
+        request = urllib.request.Request(
+            f"{DOCKER_REGISTRY_BASE}/v2/{repository}/tags/list?n=1000",
+            headers={
+                "Authorization": f"Bearer {token}",
+                "User-Agent": USER_AGENT,
+            },
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=TIMEOUT_SECONDS) as response:
+                payload = json.load(response)
+                link = response.headers.get("Link")
+        except urllib.error.HTTPError as error:
+            raise CleanupError(f"Docker registry tag inventory returned HTTP {error.code}") from None
+        except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as error:
             raise CleanupError(
-                f"Docker Hub tag count mismatch: advertised={advertised_count}, received={len(rows)}"
+                f"Docker registry tag inventory failed: {type(error).__name__}"
+            ) from None
+
+        if link:
+            raise CleanupError("Docker registry tag inventory exceeds the 1000-tag safety limit")
+        if not isinstance(payload, dict) or payload.get("name") != repository:
+            raise CleanupError("Docker registry tag inventory has an invalid repository")
+        names = payload.get("tags")
+        if names is None:
+            names = []
+        if not isinstance(names, list) or any(not isinstance(name, str) or not name for name in names):
+            raise CleanupError("Docker registry tag inventory has an invalid tag list")
+        if len(names) != len(set(names)):
+            raise CleanupError("Docker registry tag inventory contains a duplicate tag")
+
+        rows: list[dict[str, str]] = []
+        for name in sorted(names):
+            encoded_name = urllib.parse.quote(name, safe="")
+            manifest_request = urllib.request.Request(
+                f"{DOCKER_REGISTRY_BASE}/v2/{repository}/manifests/{encoded_name}",
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "Accept": MANIFEST_ACCEPT,
+                    "User-Agent": USER_AGENT,
+                },
+                method="HEAD",
             )
+            try:
+                with urllib.request.urlopen(
+                    manifest_request,
+                    timeout=TIMEOUT_SECONDS,
+                ) as response:
+                    digest = response.headers.get("Docker-Content-Digest")
+            except urllib.error.HTTPError as error:
+                raise CleanupError(
+                    f"Docker registry manifest lookup failed for {name}: HTTP {error.code}"
+                ) from None
+            except (urllib.error.URLError, TimeoutError) as error:
+                raise CleanupError(
+                    f"Docker registry manifest lookup failed for {name}: {type(error).__name__}"
+                ) from None
+            rows.append({"name": name, "digest": _validate_digest(digest, context=name)})
+
         canonical_inventory(rows)
         return rows
 
@@ -420,9 +636,82 @@ class DockerHubClient:
         token = payload.get("token") if isinstance(payload, dict) else None
         if not isinstance(token, str) or not token:
             raise CleanupError("Docker registry login response is missing a token")
-        if "delete" not in self._registry_actions(token):
-            raise CleanupError("Docker registry token is missing delete scope")
+        if not {"pull", "push", "delete"}.issubset(self._registry_actions(token)):
+            raise CleanupError("Docker registry token is missing pull, push, or delete scope")
         self.token = token
+        self.pull_token = token
+
+    def capture_manifest(self, digest: str) -> ManifestBackup:
+        digest = _validate_digest(digest, context="Docker Hub manifest backup")
+        token = self._get_pull_token()
+
+        repository = f"{DOCKERHUB_NAMESPACE}/{DOCKERHUB_REPOSITORY}"
+        request = urllib.request.Request(
+            f"{DOCKER_REGISTRY_BASE}/v2/{repository}/manifests/{digest}",
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Accept": MANIFEST_ACCEPT,
+                "User-Agent": USER_AGENT,
+            },
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=TIMEOUT_SECONDS) as response:
+                content = response.read()
+                media_type = (response.headers.get("Content-Type") or "").split(";", 1)[0]
+                response_digest = response.headers.get("Docker-Content-Digest")
+        except urllib.error.HTTPError as error:
+            raise CleanupError(
+                f"Docker Hub manifest backup failed for {digest}: HTTP {error.code}"
+            ) from None
+        except (urllib.error.URLError, TimeoutError) as error:
+            raise CleanupError(
+                f"Docker Hub manifest backup failed for {digest}: {type(error).__name__}"
+            ) from None
+
+        if media_type not in MANIFEST_MEDIA_TYPES:
+            raise CleanupError(f"Docker Hub returned an unsupported manifest media type for {digest}")
+        if response_digest is not None and response_digest != digest:
+            raise CleanupError(f"Docker Hub manifest backup digest header mismatch for {digest}")
+        content_digest = "sha256:" + hashlib.sha256(content).hexdigest()
+        if content_digest != digest:
+            raise CleanupError(f"Docker Hub manifest backup content mismatch for {digest}")
+        return ManifestBackup(digest=digest, media_type=media_type, content=content)
+
+    def restore_tag(self, name: str, backup: ManifestBackup) -> None:
+        if name != "latest" and not SHA_TAG_PATTERN.fullmatch(name):
+            raise CleanupError(f"refusing to restore an unexpected tag name: {name}")
+        if self.token is None:
+            raise CleanupError("Docker Hub client is not authenticated")
+        digest = _validate_digest(backup.digest, context=f"rollback tag {name}")
+        if backup.media_type not in MANIFEST_MEDIA_TYPES:
+            raise CleanupError(f"rollback manifest media type is invalid for {name}")
+        if "sha256:" + hashlib.sha256(backup.content).hexdigest() != digest:
+            raise CleanupError(f"rollback manifest content mismatch for {name}")
+
+        repository = f"{DOCKERHUB_NAMESPACE}/{DOCKERHUB_REPOSITORY}"
+        encoded_name = urllib.parse.quote(name, safe="")
+        request = urllib.request.Request(
+            f"{DOCKER_REGISTRY_BASE}/v2/{repository}/manifests/{encoded_name}",
+            data=backup.content,
+            headers={
+                "Authorization": f"Bearer {self.token}",
+                "Content-Type": backup.media_type,
+                "User-Agent": USER_AGENT,
+            },
+            method="PUT",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=TIMEOUT_SECONDS) as response:
+                if response.status not in {201, 202}:
+                    raise CleanupError(
+                        f"unexpected Docker Hub rollback status for {name}: {response.status}"
+                    )
+        except urllib.error.HTTPError as error:
+            raise CleanupError(f"Docker Hub rollback failed for {name}: HTTP {error.code}") from None
+        except (urllib.error.URLError, TimeoutError) as error:
+            raise CleanupError(
+                f"Docker Hub rollback request failed for {name}: {type(error).__name__}"
+            ) from None
 
     def delete_digest(self, digest: str) -> None:
         digest = _validate_digest(digest, context="Docker Hub deletion")
@@ -506,6 +795,31 @@ class GHCRArchiveClient:
             ) from None
         return _validate_digest(digest, context=f"GHCR archive {name}")
 
+    def verify_digest(self, digest: str) -> None:
+        digest = _validate_digest(digest, context="GHCR digest archive")
+        request = urllib.request.Request(
+            f"https://ghcr.io/v2/{GHCR_REPOSITORY}/manifests/{digest}",
+            headers={
+                "Accept": MANIFEST_ACCEPT,
+                "Authorization": f"Bearer {self._get_token()}",
+                "User-Agent": USER_AGENT,
+            },
+            method="HEAD",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=TIMEOUT_SECONDS) as response:
+                resolved = response.headers.get("Docker-Content-Digest")
+        except urllib.error.HTTPError as error:
+            raise CleanupError(
+                f"GHCR digest archive lookup failed for {digest}: HTTP {error.code}"
+            ) from None
+        except (urllib.error.URLError, TimeoutError) as error:
+            raise CleanupError(
+                f"GHCR digest archive lookup failed for {digest}: {type(error).__name__}"
+            ) from None
+        if resolved != digest:
+            raise CleanupError(f"GHCR digest archive mismatch for {digest}")
+
 
 def write_report(path: Path, report: Mapping[str, object]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -518,21 +832,121 @@ def write_report(path: Path, report: Mapping[str, object]) -> None:
     ) as handle:
         json.dump(report, handle, indent=2, sort_keys=True)
         handle.write("\n")
+        handle.flush()
+        os.fsync(handle.fileno())
         temporary_path = Path(handle.name)
     os.replace(temporary_path, path)
+    directory_fd = os.open(path.parent, os.O_RDONLY)
+    try:
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--expected-tag", required=True)
-    parser.add_argument("--expected-digest", required=True)
+    parser.add_argument("--expected-tag", default="")
+    parser.add_argument("--expected-digest", default="")
     parser.add_argument("--report", required=True, type=Path)
     parser.add_argument("--apply", action="store_true")
+    parser.add_argument("--recover", action="store_true")
+    parser.add_argument("--approved-plan", type=Path)
+    parser.add_argument("--approved-plan-sha256", default="")
     parser.add_argument("--confirm", default="")
+    parser.add_argument("--writer-freeze", default="")
     return parser.parse_args()
 
 
+def _require_mutation_confirmations(args: argparse.Namespace) -> None:
+    if args.confirm != DELETE_CONFIRMATION:
+        raise CleanupError("apply confirmation phrase is missing or invalid")
+    if args.writer_freeze != WRITER_FREEZE_CONFIRMATION:
+        raise CleanupError("Docker Hub writer-freeze confirmation is missing or invalid")
+
+
+def _read_report(path: Path) -> dict[str, object]:
+    try:
+        payload = json.loads(path.read_bytes())
+    except OSError as error:
+        raise CleanupError(f"cleanup report could not be read: {type(error).__name__}") from None
+    except json.JSONDecodeError:
+        raise CleanupError("cleanup report is not valid JSON") from None
+    if not isinstance(payload, dict):
+        raise CleanupError("cleanup report is not an object")
+    return payload
+
+
+def recover_report(args: argparse.Namespace) -> int:
+    if args.apply:
+        raise CleanupError("--apply and --recover cannot be combined")
+    _require_mutation_confirmations(args)
+    report = _read_report(args.report)
+    mode = report.get("mode")
+    status = report.get("status")
+    if mode not in {"apply", "dry-run"}:
+        raise CleanupError("cleanup report is not eligible for recovery")
+    if mode == "apply" and status == "applied":
+        raise CleanupError("cleanup report is not eligible for recovery")
+    if mode == "dry-run" and status != "planned":
+        raise CleanupError("cleanup report is not an approved recovery baseline")
+    if report.get("dockerhub_repository") != f"{DOCKERHUB_NAMESPACE}/{DOCKERHUB_REPOSITORY}":
+        raise CleanupError("cleanup report repository does not match the fixed Docker Hub target")
+
+    expected_tag = report.get("expected_tag")
+    expected_digest = report.get("expected_digest")
+    if not isinstance(expected_tag, str) or not isinstance(expected_digest, str):
+        raise CleanupError("cleanup report expected identity is invalid")
+    rollback_rows = report.get("rollback_inventory")
+    original, _ = _validated_inventory(
+        rollback_rows,
+        expected_tag=expected_tag,
+        expected_digest=expected_digest,
+    )
+    backups = manifest_backups_from_rows(report.get("rollback_manifests"))
+    missing = sorted(set(original.values()) - set(backups))
+    if missing:
+        raise CleanupError("cleanup report is missing rollback manifest(s): " + ", ".join(missing))
+
+    hub = DockerHubClient()
+    hub.login(os.environ.get("DOCKER_USERNAME", ""), os.environ.get("DOCKER_PASSWORD", ""))
+    live, _ = _validated_inventory(
+        hub.list_tags(),
+        expected_tag=expected_tag,
+        expected_digest=expected_digest,
+    )
+    final_inventory = {"latest": expected_digest, expected_tag: expected_digest}
+    if mode == "dry-run" and original != final_inventory and live == final_inventory:
+        report["recovery_status"] = "not_needed_final_inventory"
+        write_report(args.report, report)
+        print("dockerhub_rollback=not-needed")
+        return 0
+    report["recovery_status"] = "running"
+    write_report(args.report, report)
+    try:
+        restored = restore_inventory(hub, original, backups)
+    except CleanupError as error:
+        report["recovery_status"] = "failed"
+        report["recovery_error"] = str(error)
+        write_report(args.report, report)
+        raise
+    report["status"] = "recovered"
+    report["recovery_status"] = "completed"
+    report["remaining"] = inventory_rows(restored)
+    write_report(args.report, report)
+    print("dockerhub_rollback=completed")
+    return 0
+
+
 def run(args: argparse.Namespace) -> int:
+    if args.recover:
+        return recover_report(args)
+    if not args.expected_tag or not args.expected_digest:
+        raise CleanupError("expected tag and digest are required")
+    if args.apply and (
+        args.approved_plan is None or not args.approved_plan_sha256
+    ):
+        raise CleanupError("apply requires an exact hash-bound approved plan")
+
     report: dict[str, object] = {
         "schema_version": 2,
         "mode": "apply" if args.apply else "dry-run",
@@ -551,16 +965,53 @@ def run(args: argparse.Namespace) -> int:
             expected_digest=args.expected_digest,
         )
         archive_client = GHCRArchiveClient()
-        archive_digests = {
-            name: archive_client.digest_for_tag(name) for name in delete_names
-        }
+        archive_digests: dict[str, str] = {}
+        for name in delete_names:
+            digest = archive_client.digest_for_tag(name)
+            archive_client.verify_digest(digest)
+            archive_digests[name] = digest
         plan = build_plan(
             initial_tags,
             expected_tag=args.expected_tag,
             expected_digest=args.expected_digest,
             archive_digests=archive_digests,
         )
+        approved_report: dict[str, object] | None = None
+        if args.apply:
+            if args.approved_plan is None:
+                raise CleanupError("approved plan path is missing")
+            approved_report = load_approved_report(
+                args.approved_plan,
+                args.approved_plan_sha256,
+            )
+            approved_plan = {key: approved_report[key] for key in PLAN_KEYS}
+            if approved_plan != plan:
+                raise CleanupError("live plan does not exactly match the approved plan")
+            report["approved_plan_sha256"] = args.approved_plan_sha256
         report.update(plan)
+        original_inventory = canonical_inventory(plan["inventory"])
+        if approved_report is None:
+            backups = {
+                digest: hub.capture_manifest(digest)
+                for digest in sorted(set(original_inventory.values()))
+            }
+        else:
+            approved_inventory = canonical_inventory(approved_report.get("rollback_inventory"))
+            if approved_inventory != original_inventory:
+                raise CleanupError("approved rollback inventory does not match the live plan")
+            backups = manifest_backups_from_rows(approved_report.get("rollback_manifests"))
+            missing_backups = sorted(set(original_inventory.values()) - set(backups))
+            if missing_backups:
+                raise CleanupError(
+                    "approved plan is missing rollback manifest(s): "
+                    + ", ".join(missing_backups)
+                )
+            for digest, backup in backups.items():
+                if hub.capture_manifest(digest) != backup:
+                    raise CleanupError(f"approved manifest backup drifted for {digest}")
+        report["rollback_inventory"] = inventory_rows(original_inventory)
+        report["rollback_manifests"] = manifest_backups_to_rows(backups)
+        report["rollback_status"] = "ready"
         report["status"] = "planned"
         write_report(args.report, report)
 
@@ -572,13 +1023,12 @@ def run(args: argparse.Namespace) -> int:
         if not args.apply:
             print("dockerhub_mutation=none")
             return 0
-        if args.confirm != DELETE_CONFIRMATION:
-            raise CleanupError("apply confirmation phrase is missing or invalid")
+        _require_mutation_confirmations(args)
 
         username = os.environ.get("DOCKER_USERNAME", "")
         password = os.environ.get("DOCKER_PASSWORD", "")
         hub.login(username, password)
-        report["status"] = "applying"
+        report["status"] = "armed"
         write_report(args.report, report)
 
         def checkpoint(
@@ -602,12 +1052,26 @@ def run(args: argparse.Namespace) -> int:
                     f"archive digest drifted before deleting manifest for {name}: "
                     f"expected={expected_digest}, actual={current_digest}"
                 )
+            archive_client.verify_digest(expected_digest)
 
+        def rollback(original: Mapping[str, str]) -> None:
+            report["status"] = "rolling_back"
+            report["rollback_status"] = "running"
+            write_report(args.report, report)
+            restored = restore_inventory(hub, original, backups)
+            report["status"] = "rolled_back"
+            report["rollback_status"] = "completed"
+            report["remaining"] = inventory_rows(restored)
+            write_report(args.report, report)
+
+        report["status"] = "applying"
+        write_report(args.report, report)
         final_inventory = apply_plan(
             hub,
             plan,
             verify_archive=verify_archive,
             on_deleted=checkpoint,
+            rollback=rollback,
         )
         report["status"] = "applied"
         report["final_inventory"] = final_inventory
@@ -624,13 +1088,21 @@ def run(args: argparse.Namespace) -> int:
         print("dockerhub_exact_keep_set=ok")
         return 0
     except CleanupError as error:
-        report["status"] = "failed"
+        if report.get("rollback_status") == "completed":
+            report["status"] = "failed_rolled_back"
+        else:
+            report["status"] = "failed"
         report["error"] = str(error)
         write_report(args.report, report)
         raise
 
 
 def main() -> int:
+    def handle_termination(signum: int, _frame: object) -> None:
+        raise CleanupError(f"received termination signal {signum}")
+
+    signal.signal(signal.SIGTERM, handle_termination)
+    signal.signal(signal.SIGINT, handle_termination)
     args = parse_args()
     try:
         return run(args)
