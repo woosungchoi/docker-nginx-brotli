@@ -1,16 +1,10 @@
 #!/usr/bin/env python3
-"""Update Dockerfile dependency pins for nginx stable, PCRE2, and zlib.
+"""Refresh reviewed Dockerfile source/base input pins atomically.
 
-This script is intended for local use and for the scheduled GitHub Actions workflow.
-It updates the following ENV assignments in the repository Dockerfile:
-
-- NGINX_VERSION: latest nginx stable release from https://nginx.org/download/
-- PCRE_VERSION: latest stable PCRE2 release from GitHub
-- ZLIB_VERSION: latest stable zlib release from GitHub
-
-Exit codes:
-- 0: success, with or without changes
-- 1: runtime or validation error
+Track stable NGINX, PCRE2 and zlib versions with matching downloaded SHA256s,
+external module commits, and the official Alpine digest on the existing release
+branch. APK repository contents are rolling; see README for that limitation.
+Use --dry-run to resolve inputs without writing, or --check to detect drift.
 """
 
 from __future__ import annotations

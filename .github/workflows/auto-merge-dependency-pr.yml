@@ -30,6 +30,7 @@ jobs:
           ref: master
           persist-credentials: false
       - name: Evaluate exact-head dependency policy
+        id: policy
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
@@ -51,4 +52,26 @@ jobs:
             echo 'No dependency pull request to evaluate.'
             exit 0
           fi
-          python3 -m scripts.dependency_policy --repo "$REPO" --pr "$PR_NUMBER"
+          echo "number=$PR_NUMBER" >> "$GITHUB_OUTPUT"
+          python3 -m scripts.dependency_policy --check-only --repo "$REPO" --pr "$PR_NUMBER"
+
+      - name: Create existing GitHub App merge token
+        if: steps.policy.outputs.eligible == 'true'
+        id: app-token
+        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2
+        with:
+          app-id: ${{ vars.DEPENDENCY_UPDATE_APP_ID }}
+          private-key: ${{ secrets.DEPENDENCY_UPDATE_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: docker-nginx-brotli
+          permission-contents: write
+          permission-pull-requests: write
+      - name: Revalidate and merge checked head
+        if: steps.policy.outputs.eligible == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DEPENDENCY_MERGE_TOKEN: ${{ steps.app-token.outputs.token }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ steps.policy.outputs.number }}
+          EXPECTED_HEAD: ${{ steps.policy.outputs.head }}
+        run: python3 -m scripts.dependency_policy --repo "$REPO" --pr "$PR_NUMBER" --expected-head "$EXPECTED_HEAD"

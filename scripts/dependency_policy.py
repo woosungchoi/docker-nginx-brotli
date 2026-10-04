@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 from scripts.update_versions import PIN_PATTERNS, extract_pins, parse_semver
 
-TRUSTED_AUTHOR = "docker-nginx-brotli-automation[bot]"
+TRUSTED_AUTHOR = "app/docker-nginx-brotli-automation"
 REQUIRED_CHECKS = {"docker-smoke", "workflow and source checks", "trivy repository scan"}
 
 
@@ -33,7 +34,7 @@ def permitted_change(base: str, head: str) -> bool:
 
 def eligible(pr: dict, files: list, checks: list, base: str, head: str) -> bool:
     if not (pr["state"] == "OPEN" and not pr["isDraft"]
-            and pr["author"]["login"] == TRUSTED_AUTHOR
+            and pr["author"]["login"] == TRUSTED_AUTHOR and pr["author"].get("is_bot") is True
             and pr["baseRefName"] == "master"
             and pr["headRefName"] == "ci/update-pinned-versions"
             and not pr["isCrossRepository"] and pr["mergeStateStatus"] == "CLEAN"
@@ -56,10 +57,20 @@ def gh(*args: str):
     return json.loads(subprocess.check_output(["gh", *args], text=True))
 
 
+def merge_checked_pr(repo: str, number: str, head: str) -> None:
+    # Use the existing App for the merge so its push event triggers normal publication.
+    # Read APIs use the workflow GITHUB_TOKEN; no token is printed or written to disk.
+    merge_env = os.environ | {"GH_TOKEN": os.environ["DEPENDENCY_MERGE_TOKEN"]}
+    subprocess.run(["gh", "pr", "merge", number, "--repo", repo, "--squash",
+                    "--delete-branch", "--match-head-commit", head], check=True, env=merge_env)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repo", required=True)
     parser.add_argument("--pr", required=True)
+    parser.add_argument("--check-only", action="store_true")
+    parser.add_argument("--expected-head")
     args = parser.parse_args()
     fields = "state,isDraft,author,baseRefName,baseRefOid,headRefName,headRefOid,isCrossRepository,mergeStateStatus,labels"
     pr = gh("pr", "view", args.pr, "--repo", args.repo, "--json", fields)
@@ -70,12 +81,18 @@ def main() -> None:
     def dockerfile(sha: str) -> str:
         return subprocess.check_output(["gh", "api", f"repos/{args.repo}/contents/Dockerfile?ref={sha}",
                                         "-H", "Accept: application/vnd.github.raw+json"], text=True)
-    if not eligible(pr, files, checks, dockerfile(pr["baseRefOid"]), dockerfile(pr["headRefOid"])):
+    allowed = eligible(pr, files, checks, dockerfile(pr["baseRefOid"]), dockerfile(pr["headRefOid"]))
+    if args.expected_head and args.expected_head != pr["headRefOid"]:
+        allowed = False
+    if args.check_only:
+        with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+            output.write(f"eligible={str(allowed).lower()}\nhead={pr['headRefOid']}\n")
+        return
+    if not allowed:
         print("Dependency PR requires manual review or successful current-head checks.")
         return
     # GitHub enforces protection and --match-head-commit closes the head-update race.
-    subprocess.run(["gh", "pr", "merge", args.pr, "--repo", args.repo, "--squash",
-                    "--delete-branch", "--match-head-commit", pr["headRefOid"]], check=True)
+    merge_checked_pr(args.repo, args.pr, pr["headRefOid"])
 
 
 if __name__ == "__main__":

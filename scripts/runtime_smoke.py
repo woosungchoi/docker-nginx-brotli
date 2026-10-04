@@ -157,6 +157,7 @@ test "$(find /usr/lib/nginx/modules -name '*.so' | wc -l)" -eq 12
         docker("run", "--rm", *base, args.image, "sh", "-c", runtime_check)
         combined = docker("run", "--rm", *base, *mounts, args.image, "nginx", "-T").stdout
         require("listen 443 quic reuseport;" in combined and "load_module /usr/lib/nginx/modules/ngx_http_brotli_filter_module.so;" in combined, "combined configs were not loaded")
+        require("ssl_early_data off;" in combined and "ssl_protocols TLSv1.2 TLSv1.3;" in combined, "safe TLS defaults missing")
         # Both intentional faults must be rejected by the same config checker.
         h3.write_text(h3_text + "\ninvalid_smoke_directive;\n")
         require(docker("run", "--rm", *base, *mounts, args.image, "nginx", "-t", check=False).returncode != 0, "invalid h3 config passed")

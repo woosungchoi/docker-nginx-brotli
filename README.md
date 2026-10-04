@@ -64,6 +64,7 @@ The Dockerfile pins the official Alpine multi-architecture manifest digest, all 
 APK repositories remain rolling within Alpine 3.23; source/base pinning does not promise byte-for-byte reproduction of package resolution. The final image records installed versions at `/usr/share/nginx/apk-runtime.txt`; SBOM/provenance capture publication evidence. An immutable APK mirror would be separate infrastructure work.
 
 The weekly updater opens `ci/update-pinned-versions` PRs using the configured GitHub App (`docker-nginx-brotli-automation[bot]`; existing App ID/private-key repository settings). It does not enable a second auto-merge path.
+The merge workflow uses that same existing App credential after eligibility checks so a successful dependency merge triggers normal publication. `gh` represents this App author as `app/docker-nginx-brotli-automation`.
 The trusted default-branch policy in `scripts/dependency_policy.py` is the single merge path. It requires the exact App author, same-repository dependency head, master base, both dependency labels, and changes only to recognized Dockerfile pins. Source, security and aggregated four-architecture smoke checks must all succeed on the current head. Missing, skipped, cancelled, neutral and stale results block merging. GitHub protection still applies; the merge command matches the checked head commit.
 
 - Automatic: non-downgrade updates within the same NGINX stable branch, matching version/checksum changes, recognized module commits and same-branch Alpine digest updates.

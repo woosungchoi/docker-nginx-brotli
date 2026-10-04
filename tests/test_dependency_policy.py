@@ -14,7 +14,7 @@ SHA = 'a' * 40
 
 class PolicyTests(unittest.TestCase):
     def setUp(self):
-        self.pr = {'state': 'OPEN', 'isDraft': False, 'author': {'login': TRUSTED_AUTHOR},
+        self.pr = {'state': 'OPEN', 'isDraft': False, 'author': {'login': TRUSTED_AUTHOR, 'is_bot': True},
                    'baseRefName': 'master', 'headRefName': 'ci/update-pinned-versions',
                    'isCrossRepository': False, 'mergeStateStatus': 'CLEAN', 'headRefOid': SHA,
                    'labels': [{'name': 'dependencies'}, {'name': 'automated pr'}]}
@@ -29,7 +29,7 @@ class PolicyTests(unittest.TestCase):
         self.assertTrue(self.evaluate())
 
     def test_untrusted_metadata_and_files(self):
-        for key, value in [('author', {'login': 'github-actions[bot]'}), ('state', 'CLOSED'),
+        for key, value in [('author', {'login': 'github-actions[bot]', 'is_bot': True}), ('author', {'login': TRUSTED_AUTHOR, 'is_bot': False}), ('state', 'CLOSED'),
                            ('isDraft', True), ('isCrossRepository', True), ('baseRefName', 'other'),
                            ('headRefName', 'attacker'), ('mergeStateStatus', 'BLOCKED'), ('labels', [])]:
             with self.subTest(key=key):
@@ -71,3 +71,20 @@ class PolicyTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class MergeCredentialTests(unittest.TestCase):
+    def test_checked_head_and_app_credential_are_required(self):
+        import os
+        from unittest.mock import patch
+        from scripts.dependency_policy import merge_checked_pr
+        with patch.dict(os.environ, {'GH_TOKEN': 'read-fixture', 'DEPENDENCY_MERGE_TOKEN': 'app-fixture'}), \
+             patch('scripts.dependency_policy.subprocess.run') as merge:
+            merge_checked_pr('owner/repo', '1', SHA)
+        command = merge.call_args.args[0]
+        self.assertIn('--match-head-commit', command)
+        self.assertEqual(command[-1], SHA)
+        self.assertNotIn('--admin', command)
+        self.assertEqual(merge.call_args.kwargs['env']['GH_TOKEN'], 'app-fixture')
+        with patch.dict(os.environ, {}, clear=True), self.assertRaises(KeyError):
+            merge_checked_pr('owner/repo', '1', SHA)
