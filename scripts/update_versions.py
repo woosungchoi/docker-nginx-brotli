@@ -1,21 +1,17 @@
 #!/usr/bin/env python3
-"""Update Dockerfile dependency pins for nginx stable, PCRE2, and zlib.
+"""Refresh reviewed Dockerfile source/base input pins atomically.
 
-This script is intended for local use and for the scheduled GitHub Actions workflow.
-It updates the following ENV assignments in the repository Dockerfile:
-
-- NGINX_VERSION: latest nginx stable release from https://nginx.org/download/
-- PCRE_VERSION: latest stable PCRE2 release from GitHub
-- ZLIB_VERSION: latest stable zlib release from GitHub
-
-Exit codes:
-- 0: success, with or without changes
-- 1: runtime or validation error
+Track stable NGINX, PCRE2 and zlib versions with matching downloaded SHA256s,
+external module commits, and the official Alpine digest on the existing release
+branch. APK repository contents are rolling; see README for that limitation.
+Use --dry-run to resolve inputs without writing, or --check to detect drift.
 """
 
 from __future__ import annotations
 
 import argparse
+import hashlib
+import subprocess
 import json
 import os
 import re
@@ -38,6 +34,91 @@ VERSION_PATTERNS = {
     "PCRE_VERSION": re.compile(r"^(ENV\s+PCRE_VERSION(?:\s+|=))(\S+)(\s*)$", re.MULTILINE),
     "ZLIB_VERSION": re.compile(r"^(ENV\s+ZLIB_VERSION(?:\s+|=))(\S+)(\s*)$", re.MULTILINE),
 }
+
+PIN_KEYS = ("NGINX_VERSION", "PCRE_VERSION", "ZLIB_VERSION",
+            "NGINX_SHA256", "PCRE_SHA256", "ZLIB_SHA256",
+            "BROTLI_COMMIT", "HEADERS_MORE_COMMIT", "COOKIE_FLAG_COMMIT", "ALPINE_IMAGE")
+PIN_PATTERNS = {key: re.compile(rf"^({'ARG' if key == 'ALPINE_IMAGE' else 'ENV'}\s+{key}=)(\S+)$", re.MULTILINE)
+                for key in PIN_KEYS}
+MODULE_REPOS = {"BROTLI_COMMIT": "google/ngx_brotli",
+                "HEADERS_MORE_COMMIT": "openresty/headers-more-nginx-module",
+                "COOKIE_FLAG_COMMIT": "AirisX/nginx_cookie_flag_module"}
+
+
+def extract_pins(text: str) -> dict[str, str]:
+    pins = {}
+    for key, pattern in PIN_PATTERNS.items():
+        matches = list(pattern.finditer(text))
+        if len(matches) != 1:
+            raise UpdateError(f"expected exactly one {key} pin")
+        pins[key] = matches[0].group(2)
+    validate_pins(pins)
+    return pins
+
+
+def validate_pins(pins: dict[str, str]) -> None:
+    for key in PIN_KEYS:
+        value = pins[key]
+        pattern = (r"[0-9]+\.[0-9]+(?:\.[0-9]+)?" if key.endswith("VERSION") else
+                   r"[0-9a-f]{64}" if key.endswith("SHA256") else
+                   r"alpine:[0-9]+\.[0-9]+@sha256:[0-9a-f]{64}" if key == "ALPINE_IMAGE" else
+                   r"[0-9a-f]{40}")
+        if not re.fullmatch(pattern, value):
+            raise UpdateError(f"invalid {key} pin")
+
+
+def replace_pins(text: str, pins: dict[str, str]) -> str:
+    validate_pins(pins)
+    extract_pins(text)
+    for key, value in pins.items():
+        text = PIN_PATTERNS[key].sub(lambda m: m.group(1) + value, text)
+    return text
+
+
+def archive_checksum(url: str) -> str:
+    # Anonymous downloads only; credentials are restricted to the GitHub API.
+    request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+    digest = hashlib.sha256()
+    try:
+        with urllib.request.urlopen(request, timeout=TIMEOUT_SECONDS) as response:
+            while chunk := response.read(1024 * 1024):
+                digest.update(chunk)
+    except urllib.error.URLError as exc:
+        raise UpdateError(f"archive download failed: {url}: {exc}") from exc
+    return digest.hexdigest()
+
+
+def resolve_pins(current: dict[str, str], versions: dict[str, str]) -> dict[str, str]:
+    pins = current | versions
+    urls = {
+        "NGINX_SHA256": f"https://nginx.org/download/nginx-{versions['NGINX_VERSION']}.tar.gz",
+        "PCRE_SHA256": f"https://github.com/PCRE2Project/pcre2/releases/download/pcre2-{versions['PCRE_VERSION']}/pcre2-{versions['PCRE_VERSION']}.tar.gz",
+        "ZLIB_SHA256": f"https://github.com/madler/zlib/releases/download/v{versions['ZLIB_VERSION']}/zlib-{versions['ZLIB_VERSION']}.tar.gz",
+    }
+    for key, url in urls.items():
+        pins[key] = archive_checksum(url)
+    for key, repo in MODULE_REPOS.items():
+        pins[key] = fetch_json(f"https://api.github.com/repos/{repo}/commits/HEAD")["sha"]
+    alpine_tag = current["ALPINE_IMAGE"].split("@")[0]
+    try:
+        output = subprocess.check_output(["docker", "buildx", "imagetools", "inspect", alpine_tag], text=True)
+    except (OSError, subprocess.CalledProcessError) as exc:
+        raise UpdateError("could not resolve official Alpine manifest digest") from exc
+    match = re.search(r"^Digest:\s+(sha256:[0-9a-f]{64})$", output, re.MULTILINE)
+    if not match:
+        raise UpdateError("missing Alpine manifest digest")
+    pins["ALPINE_IMAGE"] = alpine_tag + "@" + match.group(1)
+    validate_pins(pins)
+    try:
+        # The updater only writes after the signed NGINX archive matches its new pin.
+        # Support direct script execution as well as module-based regression tests.
+        import sys
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+        from scripts.verify_nginx_source import VerificationError, verify_nginx_release
+        verify_nginx_release(pins["NGINX_VERSION"], pins["NGINX_SHA256"])
+    except (VerificationError, OSError, subprocess.SubprocessError) as exc:
+        raise UpdateError(f"upstream NGINX signature verification failed: {exc}") from exc
+    return pins
 
 
 class UpdateError(RuntimeError):
@@ -164,7 +245,12 @@ def main() -> int:
     for line in format_version_summary(current_versions, latest_versions):
         print(line)
 
-    changed = current_versions != latest_versions
+    current_pins = extract_pins(original_text)
+    latest_pins = resolve_pins(current_pins, latest_versions)
+    for key in PIN_KEYS:
+        if key not in VERSION_PATTERNS:
+            print(f"{key}: {current_pins[key]} -> {latest_pins[key]}")
+    changed = current_pins != latest_pins
     if args.check:
         return 1 if changed else 0
 
@@ -175,7 +261,7 @@ def main() -> int:
         print("No Dockerfile changes required.")
         return 0
 
-    updated_text = replace_versions(original_text, latest_versions)
+    updated_text = replace_pins(original_text, latest_pins)
     dockerfile_path.write_text(updated_text, encoding="utf-8")
     print(f"Updated {dockerfile_path}")
     return 0

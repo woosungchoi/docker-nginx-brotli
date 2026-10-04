@@ -1,67 +1,41 @@
 # docker-nginx-brotli
 
-Alpine Linux image with pinned nginx stable, TLS 1.3, HTTP/2, HTTP/3, brotli, headers-more, and Cookie-Flag module support. Dependency pins are refreshed by GitHub Actions and validated with a Docker smoke test before routine updates are merged.
+Alpine NGINX base image with HTTP/2, HTTP/3, Brotli, headers-more and Cookie-Flag.
+GitHub Actions is the supported publisher; legacy Docker Hub hooks remain no-ops.
 
-The supported automated build and publish path for this repository is **GitHub Actions**.
-The release workflow lives in [`.github/workflows/image.yml`](.github/workflows/image.yml) and is recognized by GitHub Actions on the default branch.
-
-Published images:
-
-- **Primary:** `ghcr.io/woosungchoi/nginx-http3`
-- **Compatibility mirror:** `docker.io/<dockerhub-user>/docker-nginx-brotli`
-
-GitHub Actions remains the single source of truth for release images.
-Docker Hub autobuild is intentionally retired for this repository.
-When Docker Hub credentials are configured as GitHub Actions secrets, the same multi-arch image build is pushed to Docker Hub as a mirror in addition to GHCR.
-
-## Architecture support
-
-The GitHub Actions image workflow publishes a single multi-arch manifest from one `buildx --platform ... --push` invocation. That keeps one authoritative build pipeline for release images and avoids the older Docker Hub autobuild branch-split behavior where tags could drift or lose a platform.
-
-Legacy `hooks/build` and `hooks/push` files are kept as explicit no-ops so an accidental Docker Hub autobuild re-enable does not publish from an unexpected path.
+- Primary: `ghcr.io/woosungchoi/nginx-http3`
+- Compatibility mirror: `docker.io/woosungchoi/docker-nginx-brotli`
+- Platforms: `linux/amd64`, `linux/arm64`, `linux/arm/v6`, `linux/arm/v7`
 
 ## Usage
 
-**GHCR:** `docker pull ghcr.io/woosungchoi/nginx-http3:latest`
+The default image serves `/usr/share/nginx/html` over HTTP without a bundled private key.
+Use both [nginx.conf](nginx.conf) and [h3.nginx.conf](h3.nginx.conf) together for HTTPS/HTTP2/HTTP3. The top-level config loads Brotli and includes the service config. Supply certificates for your domain through read-only mounts:
 
-**Docker Hub mirror:** `docker pull <dockerhub-user>/docker-nginx-brotli:latest`
-
-This is a base image like the default _nginx_ image. It is meant to be used as a drop-in replacement for the nginx base image.
-
-Best practice example Nginx configs are available in this repo. See [_nginx.conf_](nginx.conf) and [_h3.nginx.conf_](h3.nginx.conf).
-
-Example:
-
-```Dockerfile
-# Base Nginx HTTP/2 Image
-FROM ghcr.io/woosungchoi/nginx-http3:latest
-
-# Copy your certs.
-COPY localhost.key /etc/ssl/private/
-COPY localhost.pem /etc/ssl/
-
-# Copy your configs.
-COPY nginx.conf /etc/nginx/
-COPY h3.nginx.conf /etc/nginx/conf.d/
+```bash
+docker run --rm --stop-timeout 30 \
+  -p 80:80 -p 443:443/tcp -p 443:443/udp \
+  --mount type=bind,src="$(pwd)/nginx.conf",dst=/etc/nginx/nginx.conf,readonly \
+  --mount type=bind,src="$(pwd)/h3.nginx.conf",dst=/etc/nginx/conf.d/h3.nginx.conf,readonly \
+  --mount type=bind,src=/path/to/localhost.pem,dst=/etc/ssl/localhost.pem,readonly \
+  --mount type=bind,src=/path/to/localhost.key,dst=/etc/ssl/private/localhost.key,readonly \
+  ghcr.io/woosungchoi/nginx-http3:latest
 ```
 
-**NOTE**: Please note that you need a valid [CA](https://en.wikipedia.org/wiki/Certificate_authority) signed certificate for the client to upgrade you to HTTP/2. [Let's Encrypt](https://letsencrypt.org/) is a option for getting a free valid CA signed certificate.
+HTTP3 needs UDP reachability on the HTTPS port. The example enables TLS 1.2/1.3 and disables early data. Obsolete HTTP2 push and h3-29 advertisements have been removed.
+Rate limits inherit from `http` into every included service server: 5 requests/s, burst 10, and 10 connections per client IP, with 429 rejection status. Tune these values for your traffic. Client identity remains the direct peer address; configure narrowly scoped trusted proxies separately when needed.
+Docker sends SIGQUIT; examples give active workers 25 seconds to finish. Drain traffic first and allow Docker at least 30 seconds before forced termination.
 
-## Maintenance status
+## Validation and publication
 
-This repository is maintained through GitHub Actions:
-
-- `update pinned dependency versions` checks nginx stable, PCRE2, and zlib weekly and on manual dispatch.
-- `smoke-test` builds the image and runs `nginx -v` plus `nginx -t` before dependency updates merge.
-- `build and publish image` publishes the multi-arch image from the default branch, verifies each published tag manifest, emits BuildKit SBOM/provenance attestations, and keylessly signs the published image digest with cosign.
-- Routine dependency updates are auto-merged only after smoke-test passes; nginx stable branch moves stay manual-review only.
+`smoke-test` builds and executes all four published architectures. It loads every deployed module and requires default/combined configs, exact 200/body, dynamic Brotli, h2 ALPN/response, UDP HTTP3-only negotiation, TLS version acceptance/rejection, service rate limiting and an active response during graceful stop. Intentional h3 syntax and Brotli loader faults must fail.
+`ci` runs source/lint/security checks and Python safety contracts. On a master push, the publisher requires both source/security and four-architecture runtime validation on that merge commit before updating registry tags. SBOM/provenance, manifest verification, cosign signing and audit-only retention remain enabled.
 
 ## Release publishing and Docker Hub mirror setup
 
 The workflow always logs in to GHCR and publishes these GHCR tags:
 
 - `ghcr.io/woosungchoi/nginx-http3:latest`
-- `ghcr.io/woosungchoi/nginx-http3:<branch-or-tag>`
 - `ghcr.io/woosungchoi/nginx-http3:<short-sha>`
 
 Release images are intentionally tied to immutable commit SHA tags as well as `latest`. After publishing, the workflow verifies that every GHCR and optional Docker Hub mirror tag resolves to the build output digest and includes all expected platforms (`linux/amd64`, `linux/arm64`, `linux/arm/v6`, and `linux/arm/v7`). It also emits BuildKit SBOM/provenance attestations and uses GitHub OIDC keyless cosign signing for the published image digest. GitHub Releases are optional for this image-first repository; if release notes are needed, create a release that references the published image digest and short SHA.
@@ -82,78 +56,45 @@ Destructive automation is intentionally disabled. Docker Hub manifest deletion b
 
 If either Docker Hub secret is missing, Docker Hub mirroring and its retention plan are skipped while GHCR publishing continues. A configured username other than the fixed `woosungchoi` namespace fails before publishing. The image workflow is triggered only by pushes to `master`; it has no branch-selectable manual trigger.
 
-## Automated version pin updates
+## Automated input updates
 
-The Dockerfile pins `NGINX_VERSION`, `PCRE_VERSION`, and `ZLIB_VERSION` on purpose.
-A scheduled GitHub Actions workflow now checks for upstream releases and opens a pull request when those pins need to move.
+The Dockerfile pins the official Alpine multi-architecture manifest digest, all three archive versions/SHA256 checksums, and all external module commits. Brotli's recursive submodule uses the gitlink in its pinned parent commit. All GitHub Actions use immutable SHA references.
+`scripts/update_versions.py` tracks the latest even-minor stable NGINX release, PCRE2 and zlib releases, resolves matching downloaded archive checksums, refreshes module commits, and refreshes the Alpine digest within the existing release branch. It validates the complete pin set before writing. The build checks every archive before source compilation. CI and the updater also verify the NGINX detached signature with the pinned upstream public key/fingerprint in `keys/nginx-release.asc`, using disposable keyrings. A signing-key rotation requires review; no keyring trust settings are modified.
+APK repositories remain rolling within Alpine 3.23; source/base pinning does not promise byte-for-byte reproduction of package resolution. The final image records installed versions at `/usr/share/nginx/apk-runtime.txt`; SBOM/provenance capture publication evidence. An immutable APK mirror would be separate infrastructure work.
 
-Key files:
+The weekly updater opens `ci/update-pinned-versions` PRs using the configured GitHub App (`docker-nginx-brotli-automation[bot]`; existing App ID/private-key repository settings). It does not enable a second auto-merge path.
+The merge workflow uses that same existing App credential after eligibility checks so a successful dependency merge triggers normal publication. `gh` represents this App author as `app/docker-nginx-brotli-automation`.
+The trusted default-branch policy in `scripts/dependency_policy.py` is the single merge path. It requires the exact App author, same-repository dependency head, master base, both dependency labels, and changes only to recognized Dockerfile pins. Source, security and aggregated four-architecture smoke checks must all succeed on the current head. Missing, skipped, cancelled, neutral and stale results block merging. GitHub protection still applies; the merge command matches the checked head commit.
 
-- `scripts/update_versions.py` - resolves the latest supported versions and rewrites the Dockerfile when needed
-- `.github/workflows/update-versions.yml` - runs weekly on a schedule and on manual dispatch, then opens or updates a PR via `peter-evans/create-pull-request`
-
-### What gets tracked
-
-- **NGINX:** latest **stable** release only, parsed from `https://nginx.org/download/`
-  - The updater looks for `nginx-X.Y.Z.tar.gz` entries and keeps only versions where the **minor** number `Y` is even.
-  - Example: `1.29.x` is mainline, `1.30.x` is stable.
-- **PCRE2:** latest stable GitHub release from `PCRE2Project/pcre2`
-- **zlib:** latest stable GitHub release from `madler/zlib`
-
-### How PR creation and merge works
-
-If the updater changes the Dockerfile, GitHub Actions commits those changes to a dedicated branch (`ci/update-pinned-versions`) and opens or refreshes a pull request against the default branch using the standard `GITHUB_TOKEN`.
-
-Pull requests run the `smoke-test` workflow first. After that check passes, automated dependency PRs are handled as follows:
-
-- **Auto-merge:** patch-level nginx updates within the same stable branch, PCRE2 updates, and zlib updates.
-- **Manual merge:** nginx stable branch changes, for example `1.30.x` to `1.32.x`.
-
-This keeps routine dependency refreshes automatic while preserving human review for larger nginx stable-branch moves.
-
-### Local validation
-
-You can inspect what the updater would do without editing files:
+- Automatic: non-downgrade updates within the same NGINX stable branch, matching version/checksum changes, recognized module commits and same-branch Alpine digest updates.
+- Manual: NGINX/Alpine release-branch changes, unchanged-version archive drift, or changes outside the pin allowlist.
 
 ```bash
 python3 scripts/update_versions.py --dry-run
-```
-
-To fail when updates are available (useful for local checks):
-
-```bash
 python3 scripts/update_versions.py --check
 ```
 
-## Features
-
-- HTTP/2 (with Server Push)
-- OpenSSL-backed TLS support from Alpine packages
-- TLS 1.3 **with 0-RTT support**
-- Brotli compression
-- [headers-more-nginx-module](https://github.com/openresty/headers-more-nginx-module)
-- [nginx_cookie_flag_module](https://www.nginx.com/products/nginx/modules/cookie-flag/)
-- PCRE latest with [JIT compilation](http://nginx.org/en/docs/ngx_core_module.html#pcre_jit) enabled
-- zlib latest
-- Alpine Linux runtime image
-
-## HTTP/2 with Server Push
-
-![alt](https://user-images.githubusercontent.com/7084995/67162942-654ff300-f337-11e9-9dc0-6d7a915d517c.png)
-
-## TLS v1.3
-
-![ssllabs](https://user-images.githubusercontent.com/7084995/67164526-89b4cb00-f349-11e9-87a2-d2dc81610ed4.png)
-
-### 0-RTT Proof
-
-![tls-0-rtt](https://user-images.githubusercontent.com/7084995/67163692-08a50600-f340-11e9-830c-c8a11c824a1f.png)
-
-### Testing 0-RTT
+## Local validation
 
 ```bash
-host=domain.example.com # Replace your domain.
-echo -e "GET / HTTP/1.1\r\nHost: $host\r\nConnection: close\r\n\r\n" > request.txt
-openssl s_client -connect $host:443 -tls1_3 -sess_out session.pem -ign_eof < request.txt
-openssl s_client -connect $host:443 -tls1_3 -sess_in session.pem -early_data request.txt
+python3 -m venv .venv
+.venv/bin/pip install --require-hashes -r tests/requirements.txt
+docker build -t nginx-http3:local .
+.venv/bin/python scripts/runtime_smoke.py nginx-http3:local --platform linux/amd64
+.venv/bin/python -m unittest discover -s tests -v
 ```
+
+Use your native platform or an emulator in your own test environment. CI uses native amd64/arm64 and QEMU for arm/v6 and arm/v7. Smoke uses disposable local certificates and isolated loopback-only containers. Keys never enter the build context or published image. The hash-locked aioquic HTTP3 client has no HTTP1/HTTP2 fallback.
+
+## Features
+
+- HTTP/2, HTTP/3 and TLS 1.2/1.3 with Alpine OpenSSL
+- Dynamic/static Brotli, headers-more and Cookie-Flag
+- PCRE2 JIT and pinned zlib sources
+- XSLT, image filter, GeoIP and Perl dynamic modules, with load/dependency checks
+
+### Opting into early data
+
+Keep `ssl_early_data off` unless your application has a replay policy. TLS early data can be replayed. If explicitly enabling it, reject replay-sensitive requests with 425 when `$ssl_early_data` is set, pass `Early-Data: $ssl_early_data` to upstream applications, and apply application-side replay protection before accepting state changes. Verify your TLS backend and clients; the default CI contract tests early data off.
+
+References: [NGINX HTTP3](https://nginx.org/en/docs/http/ngx_http_v3_module.html), [Brotli dynamic loading](https://github.com/google/ngx_brotli#dynamically-loaded), [NGINX signals](https://nginx.org/en/docs/control.html), [TLS early data](https://nginx.org/en/docs/http/ngx_http_ssl_module.html#ssl_early_data).

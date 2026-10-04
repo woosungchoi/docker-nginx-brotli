@@ -1,0 +1,9 @@
+.git
+.codegraph
+.code-review-graph
+venv
+.venv
+__pycache__
+*.key
+*.pem
+build

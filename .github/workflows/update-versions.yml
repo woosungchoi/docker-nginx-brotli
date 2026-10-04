@@ -14,7 +14,7 @@ jobs:
     steps:
       - name: Create GitHub App token
         id: app-token
-        uses: actions/create-github-app-token@v2
+        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2
         with:
           app-id: ${{ vars.DEPENDENCY_UPDATE_APP_ID }}
           private-key: ${{ secrets.DEPENDENCY_UPDATE_APP_PRIVATE_KEY }}
@@ -25,14 +25,17 @@ jobs:
           permission-issues: write
 
       - name: Check out repository
-        uses: actions/checkout@v6.0.3
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           token: ${{ steps.app-token.outputs.token }}
 
       - name: Set up Python
-        uses: actions/setup-python@v6.2.0
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
         with:
           python-version: '3.x'
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # v4.1.0
 
       - name: Resolve latest upstream versions
         env:
@@ -41,13 +44,14 @@ jobs:
 
       - name: Create pull request if Dockerfile changed
         id: cpr
-        uses: peter-evans/create-pull-request@v8.1.1
+        uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1 # v8.1.1
         with:
           token: ${{ steps.app-token.outputs.token }}
-          commit-message: 'chore: update nginx, pcre2, and zlib versions'
-          title: 'chore: update nginx, pcre2, and zlib versions'
+          commit-message: 'chore: refresh pinned nginx build inputs'
+          title: 'chore: refresh pinned nginx build inputs'
           body: |
-            Automated dependency pin refresh for the Dockerfile.
+            Automated version, archive checksum, official Alpine digest and module commit refresh.
+            Only the trusted dependency merge workflow may merge after all current-head checks.
 
             This workflow:
             - tracks the latest nginx stable release from nginx.org/download/
@@ -60,68 +64,3 @@ jobs:
           labels: |
             dependencies
             automated pr
-
-      - name: Check whether nginx stable branch changed
-        id: policy
-        if: steps.cpr.outputs.pull-request-number != ''
-        env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
-          REPO: ${{ github.repository }}
-          PR_NUMBER: ${{ steps.cpr.outputs.pull-request-number }}
-        run: |
-          set -euo pipefail
-
-          PR_JSON=$(gh pr view "$PR_NUMBER" --repo "$REPO" --json baseRefName,headRefName)
-          BASE_REF=$(echo "$PR_JSON" | jq -r '.baseRefName')
-          HEAD_REF=$(echo "$PR_JSON" | jq -r '.headRefName')
-
-          git init repo
-          cd repo
-          git remote add origin "https://github.com/$REPO.git"
-          git fetch --depth=1 origin "$BASE_REF" "$HEAD_REF"
-
-          BASE_DOCKERFILE=$(git show "origin/$BASE_REF:Dockerfile")
-          HEAD_DOCKERFILE=$(git show "origin/$HEAD_REF:Dockerfile")
-
-          old_nginx=$(printf '%s\n' "$BASE_DOCKERFILE" | sed -nE 's/^ENV[[:space:]]+NGINX_VERSION([[:space:]]+|=)([^[:space:]]+).*/\2/p')
-          new_nginx=$(printf '%s\n' "$HEAD_DOCKERFILE" | sed -nE 's/^ENV[[:space:]]+NGINX_VERSION([[:space:]]+|=)([^[:space:]]+).*/\2/p')
-
-          if [ -z "$old_nginx" ] || [ -z "$new_nginx" ]; then
-            echo "manual=true" >> "$GITHUB_OUTPUT"
-            echo "reason=Could not resolve NGINX_VERSION from Dockerfile." >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          old_branch=$(printf '%s\n' "$old_nginx" | awk -F. '{print $1"."$2}')
-          new_branch=$(printf '%s\n' "$new_nginx" | awk -F. '{print $1"."$2}')
-
-          if [ "$old_branch" != "$new_branch" ]; then
-            echo "manual=true" >> "$GITHUB_OUTPUT"
-            echo "reason=nginx stable branch changed from $old_branch.x to $new_branch.x ($old_nginx -> $new_nginx)." >> "$GITHUB_OUTPUT"
-          else
-            echo "manual=false" >> "$GITHUB_OUTPUT"
-            echo "reason=nginx stable branch did not change ($old_nginx -> $new_nginx)." >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Leave manual-review comment
-        if: steps.cpr.outputs.pull-request-number != '' && steps.policy.outputs.manual == 'true'
-        env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
-          REPO: ${{ github.repository }}
-          PR_NUMBER: ${{ steps.cpr.outputs.pull-request-number }}
-          REASON: ${{ steps.policy.outputs.reason }}
-        run: |
-          gh pr comment "$PR_NUMBER" --repo "$REPO" --body "This dependency PR requires manual merge because ${REASON}"
-
-      - name: Auto-merge dependency PR
-        if: steps.cpr.outputs.pull-request-number != '' && steps.policy.outputs.manual == 'false'
-        env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
-          REPO: ${{ github.repository }}
-          PR_NUMBER: ${{ steps.cpr.outputs.pull-request-number }}
-          REASON: ${{ steps.policy.outputs.reason }}
-        run: |
-          set -euo pipefail
-          gh pr merge "$PR_NUMBER" --repo "$REPO" --auto --squash --delete-branch \
-            --subject "chore: update nginx, pcre2, and zlib versions" \
-            --body "Automatically merge dependency update after required checks pass. ${REASON}"

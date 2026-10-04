@@ -57,3 +57,41 @@ class WorkflowIntegrationTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PinUpdateTests(unittest.TestCase):
+    def test_archive_checksum_streams_anonymous_bytes(self):
+        import hashlib
+        import io
+        from scripts.update_versions import archive_checksum
+        body = b'official fixture archive' * 200000
+        with patch('scripts.update_versions.urllib.request.urlopen', return_value=io.BytesIO(body)) as urlopen:
+            with patch.dict(os.environ, {'GITHUB_TOKEN': 'test-token'}, clear=False):
+                digest = archive_checksum('https://github.com/madler/zlib/releases/download/v1.3.2/zlib-1.3.2.tar.gz')
+        self.assertEqual(digest, hashlib.sha256(body).hexdigest())
+        self.assertIsNone(urlopen.call_args.args[0].get_header('Authorization'))
+
+    def test_resolution_failure_leaves_complete_old_pinset_unchanged(self):
+        import tempfile
+        from scripts.update_versions import UpdateError, main
+        original = (REPOSITORY_ROOT / 'Dockerfile').read_text()
+        with tempfile.TemporaryDirectory() as directory:
+            dockerfile = Path(directory) / 'Dockerfile'
+            dockerfile.write_text(original)
+            with patch('sys.argv', ['update_versions', '--dockerfile', str(dockerfile)]), \
+                 patch('scripts.update_versions.fetch_text', return_value='nginx-1.30.6.tar.gz'), \
+                 patch('scripts.update_versions.latest_github_release_version', side_effect=['10.49', '1.3.2']), \
+                 patch('scripts.update_versions.resolve_pins', side_effect=UpdateError('upstream unavailable')):
+                with self.assertRaises(UpdateError):
+                    main()
+            self.assertEqual(dockerfile.read_text(), original)
+
+    def test_invalid_digest_resolution_is_rejected(self):
+        from scripts.update_versions import UpdateError, extract_pins, resolve_pins
+        pins = extract_pins((REPOSITORY_ROOT / 'Dockerfile').read_text())
+        versions = {key: pins[key] for key in ('NGINX_VERSION', 'PCRE_VERSION', 'ZLIB_VERSION')}
+        with patch('scripts.update_versions.archive_checksum', return_value='f' * 64), \
+             patch('scripts.update_versions.fetch_json', return_value={'sha': 'a' * 40}), \
+             patch('scripts.update_versions.subprocess.check_output', return_value='Digest: invalid'):
+            with self.assertRaises(UpdateError):
+                resolve_pins(pins, versions)
