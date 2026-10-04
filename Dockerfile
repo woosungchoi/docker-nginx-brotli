@@ -2,15 +2,23 @@
 # Nginx with Brotli, Headers More modules.
 ##################################################
 
-FROM alpine:latest AS builder
+ARG ALPINE_IMAGE=alpine:3.23@sha256:85fe1e81d6758c208f3e1eed4338a1997e19d4be002d4dd32d3100c9a8c010a0
+FROM ${ALPINE_IMAGE} AS builder
 
 LABEL maintainer="Woosungchoi <https://github.com/woosungchoi>"
 
 ENV NGINX_VERSION=1.30.5
 ENV PCRE_VERSION=10.48
 ENV ZLIB_VERSION=1.3.2
+ENV NGINX_SHA256=6c20565aa2325cb82216ae804f4a4ff1875179014759a381c42ddc8e11c4906d
+ENV PCRE_SHA256=ebcc25aadf2a51fa1fefa9b8bc9e7a79b3dae86870a0f1152a22e42befd46888
+ENV ZLIB_SHA256=bb329a0a2cd0274d05519d61c667c062e06990d72e125ee2dfa8de64f0119d16
+ENV BROTLI_COMMIT=a71f9312c2deb28875acc7bacfdd5695a111aa53
+ENV HEADERS_MORE_COMMIT=04b13238d1d34f57d3232b7da65b89b93720854f
+ENV COOKIE_FLAG_COMMIT=c4ff449318474fbbb4ba5f40cb67ccd54dc595d4
+ARG BUILD_JOBS=2
 
-RUN set -x; \
+RUN set -eux; \
   CONFIG="\
   --prefix=/etc/nginx \
   --sbin-path=/usr/sbin/nginx \
@@ -67,7 +75,6 @@ RUN set -x; \
   " \
   && addgroup -S nginx \
   && adduser -D -S -h /var/cache/nginx -s /sbin/nologin -G nginx nginx \
-  && apk upgrade --no-cache \
   && apk add --no-cache ca-certificates \
   && update-ca-certificates \
   && apk add --no-cache --virtual .build-deps \
@@ -78,7 +85,7 @@ RUN set -x; \
   pcre-dev \
   zlib-dev \
   linux-headers \
-  gnupg \
+  pax-utils \
   libxslt-dev \
   gd-dev \
   geoip-dev \
@@ -90,40 +97,45 @@ RUN set -x; \
   git \
   g++ \
   cmake \
-  go \
   perl \
-  rust \
-  cargo \
   patch \
   && mkdir -p /usr/src \
   && cd /usr/src \
-  && git clone --recurse-submodules -j8 https://github.com/google/ngx_brotli \
+  && wget -qO pcre.tar.gz https://github.com/PCRE2Project/pcre2/releases/download/pcre2-${PCRE_VERSION}/pcre2-${PCRE_VERSION}.tar.gz \
+  && echo "$PCRE_SHA256  pcre.tar.gz" | sha256sum -c - \
+  && tar zxf pcre.tar.gz && rm pcre.tar.gz \
+  && wget -qO zlib.tar.gz https://github.com/madler/zlib/releases/download/v${ZLIB_VERSION}/zlib-${ZLIB_VERSION}.tar.gz \
+  && echo "$ZLIB_SHA256  zlib.tar.gz" | sha256sum -c - \
+  && tar zxf zlib.tar.gz && rm zlib.tar.gz \
+  && wget -qO nginx.tar.gz https://nginx.org/download/nginx-$NGINX_VERSION.tar.gz \
+  && echo "$NGINX_SHA256  nginx.tar.gz" | sha256sum -c - \
+  && tar -zxC /usr/src -f nginx.tar.gz \
+  && rm nginx.tar.gz \
+  && git clone https://github.com/google/ngx_brotli \
+  && git -C ngx_brotli checkout --detach "$BROTLI_COMMIT" \
+  && git -C ngx_brotli submodule update --init --recursive \
   && cd ngx_brotli/deps/brotli \
   && mkdir out && cd out \
   && cmake -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF -DCMAKE_C_FLAGS="-Ofast -flto -funroll-loops -ffunction-sections -fdata-sections -Wl,--gc-sections" -DCMAKE_CXX_FLAGS="-Ofast -flto -funroll-loops -ffunction-sections -fdata-sections -Wl,--gc-sections" -DCMAKE_INSTALL_PREFIX=./installed .. \
   && cmake --build . --config Release --target brotlienc \
   && cd ../../../.. \
-  && wget -qO- https://github.com/PCRE2Project/pcre2/releases/download/pcre2-${PCRE_VERSION}/pcre2-${PCRE_VERSION}.tar.gz | tar zxvf - \
   && cd pcre2-${PCRE_VERSION} \
   && ./configure \
   && make \
   && make install \
   && cd .. \
-  && wget -qO- https://github.com/madler/zlib/releases/download/v${ZLIB_VERSION}/zlib-${ZLIB_VERSION}.tar.gz | tar zxvf - \
   && cd zlib-${ZLIB_VERSION} \
   && ./configure \
   && make \
   && make install \
   && cd .. \
-  && git clone --depth=1 --recursive https://github.com/openresty/headers-more-nginx-module \
-  && git clone --depth=1 --recursive https://github.com/AirisX/nginx_cookie_flag_module \
-  && wget -qO nginx.tar.gz https://nginx.org/download/nginx-$NGINX_VERSION.tar.gz \
-  && mkdir -p /usr/src \
-  && tar -zxC /usr/src -f nginx.tar.gz \
-  && rm nginx.tar.gz \
+  && git clone https://github.com/openresty/headers-more-nginx-module \
+  && git -C headers-more-nginx-module checkout --detach "$HEADERS_MORE_COMMIT" \
+  && git clone https://github.com/AirisX/nginx_cookie_flag_module \
+  && git -C nginx_cookie_flag_module checkout --detach "$COOKIE_FLAG_COMMIT" \
   && cd /usr/src/nginx-$NGINX_VERSION \
   && ./configure $CONFIG --with-debug --build="pcre-${PCRE_VERSION} zlib-${ZLIB_VERSION} headers-more-nginx-module-$(git --git-dir=/usr/src/headers-more-nginx-module/.git rev-parse --short HEAD) nginx_cookie_flag_module-$(git --git-dir=/usr/src/nginx_cookie_flag_module/.git rev-parse --short HEAD)" \
-  && make -j$(getconf _NPROCESSORS_ONLN) \
+  && make -j"$BUILD_JOBS" \
   && mv objs/nginx objs/nginx-debug \
   && mv objs/ngx_http_xslt_filter_module.so objs/ngx_http_xslt_filter_module-debug.so \
   && mv objs/ngx_http_image_filter_module.so objs/ngx_http_image_filter_module-debug.so \
@@ -131,7 +143,7 @@ RUN set -x; \
   && mv objs/ngx_http_perl_module.so objs/ngx_http_perl_module-debug.so \
   && mv objs/ngx_stream_geoip_module.so objs/ngx_stream_geoip_module-debug.so \
   && ./configure $CONFIG --build="pcre-${PCRE_VERSION} zlib-${ZLIB_VERSION} headers-more-nginx-module-$(git --git-dir=/usr/src/headers-more-nginx-module/.git rev-parse --short HEAD) nginx_cookie_flag_module-$(git --git-dir=/usr/src/nginx_cookie_flag_module/.git rev-parse --short HEAD)" \
-  && make -j$(getconf _NPROCESSORS_ONLN) \
+  && make -j"$BUILD_JOBS" \
   && make install \
   && rm -rf /etc/nginx/html/ \
   && mkdir /etc/nginx/conf.d/ \
@@ -159,32 +171,22 @@ RUN set -x; \
   && apk add --no-cache --virtual .gettext gettext \
   && mv /usr/bin/envsubst /tmp/ \
   \
-  && runDeps="$( \
-  scanelf --needed --nobanner /usr/sbin/nginx /usr/lib/nginx/modules/*.so /tmp/envsubst \
-  | awk '{ gsub(/,/, "\nso:", $2); print "so:" $2 }' \
-  | sort -u \
-  | xargs -r apk info --installed \
-  | sort -u \
-  )" \
-  && apk add --no-cache --virtual .nginx-rundeps $runDeps \
-  && apk del .build-deps \
-  && apk del .brotli-build-deps \
-  && apk del .gettext \
+  # Pass SONAME providers to the runtime stage; include both binaries and all modules.
   && mv /tmp/envsubst /usr/local/bin/
 
-# Create self-signed certificate
-RUN apk add --no-cache openssl \
-  && openssl req -x509 -newkey rsa:4096 -nodes -keyout /etc/ssl/private/localhost.key -out /etc/ssl/localhost.pem -days 365 -sha256 -subj '/CN=localhost'
+RUN set -eux; scanelf --needed --nobanner --format '%n#p' /usr/sbin/nginx /usr/sbin/nginx-debug /usr/lib/nginx/modules/*.so /usr/local/bin/envsubst \
+  | tr ',' '\n' | sort -u | sed '/^$/d; s/^/so:/' > /tmp/nginx-rundeps
 
-FROM alpine:latest
+FROM ${ALPINE_IMAGE}
 
 COPY --from=builder /usr/sbin/nginx /usr/sbin/nginx-debug /usr/sbin/
-COPY --from=builder /usr/lib/nginx /usr/lib/
+COPY --from=builder /usr/lib/nginx/modules/ /usr/lib/nginx/modules/
+COPY --from=builder /usr/local/lib/perl5/ /usr/local/lib/perl5/
 COPY --from=builder /usr/share/nginx/html/* /usr/share/nginx/html/
-COPY --from=builder /etc/nginx/* /etc/nginx/
+COPY --from=builder /etc/nginx/ /etc/nginx/
 COPY --from=builder /usr/local/bin/envsubst /usr/local/bin/
-COPY --from=builder /etc/ssl/private/localhost.key /etc/ssl/private/
-COPY --from=builder /etc/ssl/localhost.pem /etc/ssl/
+COPY --from=builder /tmp/nginx-rundeps /tmp/nginx-rundeps
+COPY default.nginx.conf /etc/nginx/nginx.conf
 
 RUN \
   # Bring in tzdata so users could set the timezones through the environment
@@ -192,13 +194,13 @@ RUN \
   apk add --no-cache tzdata \
   \
   && apk add --no-cache \
-  pcre \
-  libgcc \
-  libintl \
+  $(cat /tmp/nginx-rundeps) \
+  && rm /tmp/nginx-rundeps \
+  && apk info -vv > /usr/share/nginx/apk-runtime.txt \
   && addgroup -S nginx \
   && adduser -D -S -h /var/cache/nginx -s /sbin/nologin -G nginx nginx \
   # forward request and error logs to docker log collector
-  && mkdir -p /var/log/nginx \
+  && mkdir -p /var/cache/nginx /var/log/nginx \
   && touch /var/log/nginx/access.log /var/log/nginx/error.log \
   && chown nginx: /var/log/nginx/access.log /var/log/nginx/error.log \
   && ln -sf /dev/stdout /var/log/nginx/access.log \
@@ -208,7 +210,9 @@ RUN \
 # COPY nginx.conf /etc/nginx/
 # COPY h3.nginx.conf /etc/nginx/conf.d/
 
-STOPSIGNAL SIGTERM
+EXPOSE 80 443/tcp 443/udp
+
+STOPSIGNAL SIGQUIT
 
 CMD ["nginx", "-g", "daemon off;"]
 
