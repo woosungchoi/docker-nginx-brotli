@@ -109,6 +109,15 @@ def resolve_pins(current: dict[str, str], versions: dict[str, str]) -> dict[str,
         raise UpdateError("missing Alpine manifest digest")
     pins["ALPINE_IMAGE"] = alpine_tag + "@" + match.group(1)
     validate_pins(pins)
+    try:
+        # The updater only writes after the signed NGINX archive matches its new pin.
+        # Support direct script execution as well as module-based regression tests.
+        import sys
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+        from scripts.verify_nginx_source import VerificationError, verify_nginx_release
+        verify_nginx_release(pins["NGINX_VERSION"], pins["NGINX_SHA256"])
+    except (VerificationError, OSError, subprocess.SubprocessError) as exc:
+        raise UpdateError(f"upstream NGINX signature verification failed: {exc}") from exc
     return pins
 
 

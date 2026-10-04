@@ -36,7 +36,6 @@ Docker sends SIGQUIT; examples give active workers 25 seconds to finish. Drain t
 The workflow always logs in to GHCR and publishes these GHCR tags:
 
 - `ghcr.io/woosungchoi/nginx-http3:latest`
-- `ghcr.io/woosungchoi/nginx-http3:<branch-or-tag>`
 - `ghcr.io/woosungchoi/nginx-http3:<short-sha>`
 
 Release images are intentionally tied to immutable commit SHA tags as well as `latest`. After publishing, the workflow verifies that every GHCR and optional Docker Hub mirror tag resolves to the build output digest and includes all expected platforms (`linux/amd64`, `linux/arm64`, `linux/arm/v6`, and `linux/arm/v7`). It also emits BuildKit SBOM/provenance attestations and uses GitHub OIDC keyless cosign signing for the published image digest. GitHub Releases are optional for this image-first repository; if release notes are needed, create a release that references the published image digest and short SHA.
@@ -60,7 +59,7 @@ If either Docker Hub secret is missing, Docker Hub mirroring and its retention p
 ## Automated input updates
 
 The Dockerfile pins the official Alpine multi-architecture manifest digest, all three archive versions/SHA256 checksums, and all external module commits. Brotli's recursive submodule uses the gitlink in its pinned parent commit. All GitHub Actions use immutable SHA references.
-`scripts/update_versions.py` tracks the latest even-minor stable NGINX release, PCRE2 and zlib releases, resolves matching downloaded archive checksums, refreshes module commits, and refreshes the Alpine digest within the existing release branch. It validates the complete pin set before writing. The build checks every archive before source compilation.
+`scripts/update_versions.py` tracks the latest even-minor stable NGINX release, PCRE2 and zlib releases, resolves matching downloaded archive checksums, refreshes module commits, and refreshes the Alpine digest within the existing release branch. It validates the complete pin set before writing. The build checks every archive before source compilation. CI and the updater also verify the NGINX detached signature with the pinned upstream public key/fingerprint in `keys/nginx-release.asc`, using disposable keyrings. A signing-key rotation requires review; no keyring trust settings are modified.
 APK repositories remain rolling within Alpine 3.23; source/base pinning does not promise byte-for-byte reproduction of package resolution. The final image records installed versions at `/usr/share/nginx/apk-runtime.txt`; SBOM/provenance capture publication evidence. An immutable APK mirror would be separate infrastructure work.
 
 The weekly updater opens `ci/update-pinned-versions` PRs using the configured GitHub App (`docker-nginx-brotli-automation[bot]`; existing App ID/private-key repository settings). It does not enable a second auto-merge path.

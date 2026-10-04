@@ -58,6 +58,9 @@ jobs:
       - name: Install locked test dependencies
         run: python3 -m pip install --require-hashes -r tests/requirements.txt
 
+      - name: Verify signed NGINX archive and corrupted-payload rejection
+        run: python3 -m scripts.verify_nginx_source --negative-test
+
       - name: Test Python safety contracts
         run: |
           python3 -m unittest discover -s tests -v
@@ -115,7 +118,7 @@ jobs:
         run: docker buildx build --check --file Dockerfile .
 
       - name: Lint Dockerfile with Hadolint
-        run: docker run --rm -i hadolint/hadolint:v2.14.0 hadolint --failure-threshold error - < Dockerfile
+        run: docker run --rm -i hadolint/hadolint:v2.14.0@sha256:27086352fd5e1907ea2b934eb1023f217c5ae087992eb59fde121dce9c9ff21e hadolint --failure-threshold error - < Dockerfile
 
   trivy-repository-scan:
     name: trivy repository scan
@@ -130,7 +133,7 @@ jobs:
         run: |
           docker run --rm \
             -v "${PWD}:/src" \
-            aquasec/trivy:0.71.0 \
+            aquasec/trivy:0.71.0@sha256:016eae51fdcf989332a5404af7e8f625cd5d95d7c0907a221d080a996f556500 \
             fs \
             --ignorefile /src/.trivyignore \
             --scanners misconfig,secret \
