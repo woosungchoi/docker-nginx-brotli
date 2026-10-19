@@ -1,11 +1,24 @@
 from __future__ import annotations
 import copy
 import unittest
-from pathlib import Path
 from scripts.dependency_policy import REQUIRED_CHECKS, TRUSTED_AUTHOR, eligible, permitted_change
 from scripts.update_versions import UpdateError, extract_pins, replace_pins
 
-BASE = (Path(__file__).resolve().parents[1] / 'Dockerfile').read_text()
+# Policy examples must not move when the dependency updater edits Dockerfile.
+# Otherwise a fixed target version eventually becomes a checksum-only change.
+BASE = f"""ARG ALPINE_IMAGE=alpine:3.23@sha256:{'a' * 64}
+FROM ${{ALPINE_IMAGE}}
+ENV NGINX_VERSION=1.30.5
+ENV PCRE_VERSION=10.49
+ENV ZLIB_VERSION=1.3.2
+ENV NGINX_SHA256={'b' * 64}
+ENV PCRE_SHA256={'c' * 64}
+ENV ZLIB_SHA256={'d' * 64}
+ENV BROTLI_COMMIT={'a' * 40}
+ENV HEADERS_MORE_COMMIT={'b' * 40}
+ENV COOKIE_FLAG_COMMIT={'c' * 40}
+STOPSIGNAL SIGQUIT
+"""
 PINS = extract_pins(BASE)
 NEW_PINS = PINS | {'NGINX_VERSION': '1.30.6', 'NGINX_SHA256': 'f' * 64}
 HEAD = replace_pins(BASE, NEW_PINS)
@@ -27,6 +40,17 @@ class PolicyTests(unittest.TestCase):
 
     def test_trusted_patch_after_all_checks(self):
         self.assertTrue(self.evaluate())
+
+    def test_patch_policy_across_release_versions(self):
+        for current, updated in [('1.30.5', '1.30.6'), ('1.30.6', '1.30.7'),
+                                 ('1.32.0', '1.32.1')]:
+            with self.subTest(current=current, updated=updated):
+                base = replace_pins(BASE, PINS | {'NGINX_VERSION': current})
+                head = replace_pins(BASE, NEW_PINS | {'NGINX_VERSION': updated})
+                self.assertTrue(eligible(self.pr, ['Dockerfile'], self.checks, base, head))
+                checksum_only = replace_pins(base, PINS | {
+                    'NGINX_VERSION': current, 'NGINX_SHA256': 'f' * 64})
+                self.assertFalse(permitted_change(base, checksum_only))
 
     def test_untrusted_metadata_and_files(self):
         for key, value in [('author', {'login': 'github-actions[bot]', 'is_bot': True}), ('author', {'login': TRUSTED_AUTHOR, 'is_bot': False}), ('state', 'CLOSED'),
