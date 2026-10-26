@@ -86,6 +86,9 @@ docker build -t nginx-http3:local .
 
 Use your native platform or an emulator in your own test environment. CI uses native amd64/arm64 and QEMU for arm/v6 and arm/v7. Smoke uses disposable local certificates and isolated loopback-only containers. Keys never enter the build context or published image. The hash-locked aioquic HTTP3 client has no HTTP1/HTTP2 fallback.
 
+Regenerate the test lock with `uv pip compile --generate-hashes tests/requirements.in -o tests/requirements.txt`.
+Keep `typing-extensions` in the input: pyOpenSSL requires it on the Python 3.12 smoke runners even when a newer Python resolver omits that conditional dependency. CI verifies a clean hash-locked installation on both Python 3.12 and the latest stable Python.
+
 ## Features
 
 - HTTP/2, HTTP/3 and TLS 1.2/1.3 with Alpine OpenSSL
