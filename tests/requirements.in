@@ -1,1 +1,4 @@
 aioquic==1.3.0
+# Keep pyOpenSSL's Python <3.13 dependency when newer Python regenerates the lock.
+# Smoke runners use Python 3.12, so this must remain an explicit input.
+typing-extensions==4.16.0

@@ -12,6 +12,29 @@ permissions:
   contents: read
 
 jobs:
+  test-dependency-lock:
+    name: test dependency lock (Python ${{ matrix.python }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ['3.12', '3.x']
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Verify locked HTTP3 dependencies in a clean environment
+        run: |
+          python -m venv .venv
+          .venv/bin/python -m pip install --require-hashes -r tests/requirements.txt
+          .venv/bin/python -m pip check
+          .venv/bin/python -c 'import aioquic, OpenSSL, certifi, typing_extensions'
+
   workflow-and-source-checks:
     name: workflow and source checks
     runs-on: ubuntu-latest
