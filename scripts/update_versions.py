@@ -28,6 +28,8 @@ ZLIB_RELEASE_URL = "https://api.github.com/repos/madler/zlib/releases/latest"
 DOCKERFILE_PATH = Path(__file__).resolve().parents[1] / "Dockerfile"
 USER_AGENT = "docker-nginx-brotli-version-updater/1.0"
 TIMEOUT_SECONDS = 30
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from network_retry import read_with_retry
 
 VERSION_PATTERNS = {
     "NGINX_VERSION": re.compile(r"^(ENV\s+NGINX_VERSION(?:\s+|=))(\S+)(\s*)$", re.MULTILINE),
@@ -78,14 +80,16 @@ def replace_pins(text: str, pins: dict[str, str]) -> str:
 def archive_checksum(url: str) -> str:
     # Anonymous downloads only; credentials are restricted to the GitHub API.
     request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
-    digest = hashlib.sha256()
-    try:
+    def download():
+        digest = hashlib.sha256()
         with urllib.request.urlopen(request, timeout=TIMEOUT_SECONDS) as response:
             while chunk := response.read(1024 * 1024):
                 digest.update(chunk)
-    except urllib.error.URLError as exc:
+        return digest.hexdigest()
+    try:
+        return read_with_retry(download)
+    except (OSError, urllib.error.URLError) as exc:
         raise UpdateError(f"archive download failed: {url}: {exc}") from exc
-    return digest.hexdigest()
 
 
 def resolve_pins(current: dict[str, str], versions: dict[str, str]) -> dict[str, str]:
@@ -138,10 +142,12 @@ def fetch_text(url: str) -> str:
         if token:
             headers["Authorization"] = f"Bearer {token}"
     request = urllib.request.Request(url, headers=headers)
-    try:
+    def download():
         with urllib.request.urlopen(request, timeout=TIMEOUT_SECONDS) as response:
             return response.read().decode("utf-8")
-    except urllib.error.URLError as exc:
+    try:
+        return read_with_retry(download)
+    except (OSError, urllib.error.URLError) as exc:
         raise UpdateError(f"failed to fetch {url}: {exc}") from exc
 
 

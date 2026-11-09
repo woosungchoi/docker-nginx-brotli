@@ -140,7 +140,7 @@ jobs:
             type=gha,scope=smoke-linux/arm64
             type=gha,scope=smoke-linux/arm/v6
             type=gha,scope=smoke-linux/arm/v7
-          cache-to: type=gha,mode=max
+          cache-to: type=gha,mode=max,ignore-error=true,timeout=2m
           sbom: true
           provenance: mode=max
 
