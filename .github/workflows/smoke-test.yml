@@ -49,7 +49,7 @@ jobs:
           platforms: ${{ matrix.platform }}
           tags: nginx-http3:smoke-${{ github.run_id }}-${{ github.run_attempt }}
           cache-from: type=gha,scope=smoke-${{ matrix.platform }}
-          cache-to: type=gha,mode=max,scope=smoke-${{ matrix.platform }}
+          cache-to: type=gha,mode=max,scope=smoke-${{ matrix.platform }},ignore-error=true,timeout=2m
       - name: Test final runtime and recommended configuration
         env:
           IMAGE: nginx-http3:smoke-${{ github.run_id }}-${{ github.run_attempt }}

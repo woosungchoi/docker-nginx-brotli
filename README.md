@@ -101,3 +101,24 @@ Keep `typing-extensions` in the input: pyOpenSSL requires it on the Python 3.12 
 Keep `ssl_early_data off` unless your application has a replay policy. TLS early data can be replayed. If explicitly enabling it, reject replay-sensitive requests with 425 when `$ssl_early_data` is set, pass `Early-Data: $ssl_early_data` to upstream applications, and apply application-side replay protection before accepting state changes. Verify your TLS backend and clients; the default CI contract tests early data off.
 
 References: [NGINX HTTP3](https://nginx.org/en/docs/http/ngx_http_v3_module.html), [Brotli dynamic loading](https://github.com/google/ngx_brotli#dynamically-loaded), [NGINX signals](https://nginx.org/en/docs/control.html), [TLS early data](https://nginx.org/en/docs/http/ngx_http_ssl_module.html#ssl_early_data).
+
+### Automatic update reliability
+
+Pinned upstream inputs are checked daily at 03:17 UTC. A repository concurrency
+lock prevents overlapping updater writers. Only transient read failures retry
+(up to three attempts); checksum, signature and policy failures remain fatal.
+Actions updates are proposed separately by Dependabot, so they cannot silently
+change the dependency-only merge allowlist.
+
+GHA cache exports are best-effort with a two-minute budget. Cache storage failure
+does not suppress runtime tests; compilation, runtime, source and security checks
+remain mandatory. Trusted default-branch recovery may retry failed dependency PR
+smoke checks up to three total attempts, only when every non-aggregate failure has
+a recognized transport error and the PR still points to that exact commit.
+Publishers, closed/stale/fork PRs and deterministic validation errors are never
+replayed. Failed publication must be reconciled against remote digests first.
+
+A separate daily health job at 08:43 UTC fails visibly if no scheduled dependency
+check has succeeded in 48 hours. It does not send messages, change pins, merge PRs
+or replay publication. This is a GitHub-side liveness check, not an independent
+external scheduler; a GitHub-wide scheduler outage still requires external monitoring.
